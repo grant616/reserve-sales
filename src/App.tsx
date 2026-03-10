@@ -2,12 +2,16 @@ import { useState, useEffect, useCallback } from "react";
 
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRK2-o2zUYccClexMlZlYQRqcAu5BuCECMTnI9UYmZu0xKpqWdg2IclcX-sroV1ieWUdOH0gahoBwOy/pub?gid=306047208&single=true&output=csv";
 const REFRESH_INTERVAL = 60000;
-const SEED_REVENUE = 11700;
+const ADMIN_PASSWORD = "reserve2026";
 
 const COLS: Record<string, string> = {
-  date: "Timestamp", rep: "Name", callsBooked: "Total Calls",
-  totalCalls: "Total Calls", shows: "Show ups", noShows: "No Shows",
-  closes: "Total Deals Closed", revenue: "Cash Collected",
+  date: "Timestamp",
+  rep: "Name",
+  totalCalls: "Total calls",
+  noShows: "No Shows",
+  shows: "Show ups",
+  closes: "Total Deals Closed",
+  revenue: "Cash Collected",
 };
 
 const GREEN = "#22C55E";
@@ -23,12 +27,18 @@ const FONT_URL = "https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&
 type FilterMode = "today" | "this_week" | "this_month" | "last_month" | "7D" | "14D" | "30D" | "90D";
 
 interface Row {
-  date: string; rep: string; callsBooked: number; totalCalls: number;
+  id: string; date: string; rep: string; totalCalls: number;
   shows: number; noShows: number; closes: number; revenue: number;
 }
 interface Stats {
-  totalCalls: number; callsBooked: number; shows: number;
-  noShows: number; closes: number; revenue: number;
+  totalCalls: number; shows: number; noShows: number; closes: number; revenue: number;
+}
+interface Override {
+  id: string; field: string; value: number;
+}
+interface ManualEntry {
+  id: string; date: string; rep: string; totalCalls: number;
+  shows: number; noShows: number; closes: number; revenue: number;
 }
 
 function getDateRange(mode: FilterMode): { start: Date; end: Date } {
@@ -78,10 +88,19 @@ function num(v: unknown): number { const n = parseFloat(String(v).replace(/[^0-9
 function pct(a: number, b: number): number { if (!b) return 0; return Math.round((a / b) * 100); }
 function money(n: number): string { return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 0 }); }
 
+function applyOverrides(rows: Row[], overrides: Override[]): Row[] {
+  return rows.map(row => {
+    const rowOverrides = overrides.filter(o => o.id === row.id);
+    if (!rowOverrides.length) return row;
+    const updated = { ...row };
+    rowOverrides.forEach(o => { (updated as any)[o.field] = o.value; });
+    return updated;
+  });
+}
+
 function computeStats(rows: Row[], seedRevenue = 0): Stats {
   return {
     totalCalls: rows.reduce((s, r) => s + r.totalCalls, 0),
-    callsBooked: rows.reduce((s, r) => s + r.callsBooked, 0),
     shows: rows.reduce((s, r) => s + r.shows, 0),
     noShows: rows.reduce((s, r) => s + r.noShows, 0),
     closes: rows.reduce((s, r) => s + r.closes, 0),
@@ -90,11 +109,11 @@ function computeStats(rows: Row[], seedRevenue = 0): Stats {
 }
 
 function repStats(rows: Row[]) {
-  const map: Record<string, Row & { rep: string }> = {};
+  const map: Record<string, any> = {};
   rows.forEach(r => {
     const name = r.rep || "Unknown";
-    if (!map[name]) map[name] = { rep: name, totalCalls: 0, callsBooked: 0, shows: 0, noShows: 0, closes: 0, revenue: 0, date: "" };
-    (["totalCalls","callsBooked","shows","noShows","closes","revenue"] as (keyof Stats)[]).forEach(k => { (map[name] as any)[k] += (r as any)[k]; });
+    if (!map[name]) map[name] = { rep: name, totalCalls: 0, shows: 0, noShows: 0, closes: 0, revenue: 0 };
+    (["totalCalls","shows","noShows","closes","revenue"]).forEach(k => { map[name][k] += (r as any)[k]; });
   });
   return Object.values(map).sort((a, b) => b.revenue - a.revenue);
 }
@@ -157,13 +176,28 @@ const FILTER_GROUPS = [
   { label: "90D", value: "90D" as FilterMode },
 ];
 
+const FIELDS = ["totalCalls","shows","noShows","closes","revenue"];
+
 export default function ReserveDashboard() {
-  const [rawRows, setRawRows] = useState<Row[] | null>(null);
+  const [rawRows, setRawRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [filterRep, setFilterRep] = useState("All");
   const [filterMode, setFilterMode] = useState<FilterMode>("this_month");
+  const [seedRevenue, setSeedRevenue] = useState(11700);
+
+  // Admin state
+  const [showAdmin, setShowAdmin] = useState(false);
+  const [adminAuthed, setAdminAuthed] = useState(false);
+  const [adminPwInput, setAdminPwInput] = useState("");
+  const [adminPwError, setAdminPwError] = useState(false);
+  const [overrides, setOverrides] = useState<Override[]>([]);
+  const [manualEntries, setManualEntries] = useState<ManualEntry[]>([]);
+  const [editingRow, setEditingRow] = useState<string | null>(null);
+  const [editVals, setEditVals] = useState<Record<string, string>>({});
+  const [newEntry, setNewEntry] = useState({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", revenue: "" });
+  const [activeAdminTab, setActiveAdminTab] = useState<"overrides"|"manual"|"settings">("overrides");
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -177,11 +211,15 @@ export default function ReserveDashboard() {
       if (!res.ok) throw new Error("Fetch failed");
       const text = await res.text();
       const parsed = parseCSV(text);
-      const normalized: Row[] = parsed.map(r => ({
-        date: getVal(r, "date"), rep: getVal(r, "rep"),
-        callsBooked: num(getVal(r, "callsBooked")), totalCalls: num(getVal(r, "totalCalls")),
-        shows: num(getVal(r, "shows")), noShows: num(getVal(r, "noShows")),
-        closes: num(getVal(r, "closes")), revenue: num(getVal(r, "revenue")),
+      const normalized: Row[] = parsed.map((r, i) => ({
+        id: `row_${i}`,
+        date: getVal(r, "date"),
+        rep: getVal(r, "rep"),
+        totalCalls: num(getVal(r, "totalCalls")),
+        shows: num(getVal(r, "shows")),
+        noShows: num(getVal(r, "noShows")),
+        closes: num(getVal(r, "closes")),
+        revenue: num(getVal(r, "revenue")),
       }));
       setRawRows(normalized); setError(null);
     } catch (e) { setError((e as Error).message); }
@@ -194,22 +232,26 @@ export default function ReserveDashboard() {
     return () => clearInterval(t);
   }, [fetchData]);
 
-  const rows = rawRows || [];
+  const allRows: Row[] = [
+    ...applyOverrides(rawRows, overrides),
+    ...manualEntries.map(m => ({ ...m })),
+  ];
+
   const { start, end } = getDateRange(filterMode);
   const isThisMonth = filterMode === "this_month";
 
-  const filtered = rows.filter(r => {
+  const filtered = allRows.filter(r => {
     if (filterRep !== "All" && r.rep !== filterRep) return false;
     if (!r.date) return true;
     const d = new Date(r.date);
     return d >= start && d <= end;
   });
 
-  const seedForFilter = isThisMonth ? SEED_REVENUE : 0;
+  const seedForFilter = isThisMonth ? seedRevenue : 0;
   const stats = computeStats(filtered, seedForFilter);
   const reps = repStats(filtered);
   const trend = dailyTrend(filtered);
-  const allReps = ["All", ...Array.from(new Set(rows.map(r => r.rep).filter(Boolean)))];
+  const allReps = ["All", ...Array.from(new Set(allRows.map(r => r.rep).filter(Boolean)))];
 
   const monthPct = pct(stats.revenue, TARGET_MONTHLY);
   const showRate = pct(stats.shows, stats.totalCalls);
@@ -226,8 +268,8 @@ export default function ReserveDashboard() {
 
   const monthStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
   const monthEnd = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59);
-  const monthRows = rows.filter(r => { if (!r.date) return false; const d = new Date(r.date); return d >= monthStart && d <= monthEnd; });
-  const monthStats = computeStats(monthRows, SEED_REVENUE);
+  const monthRows = allRows.filter(r => { if (!r.date) return false; const d = new Date(r.date); return d >= monthStart && d <= monthEnd; });
+  const monthStats = computeStats(monthRows, seedRevenue);
   const revenueThisMonth = monthStats.revenue;
   const closesThisMonth = monthStats.closes || 0;
 
@@ -240,17 +282,57 @@ export default function ReserveDashboard() {
   const closesPerDayActual = (closesThisMonth / daysElapsed).toFixed(1);
   const closesPerDayNeeded = Math.ceil((TARGET_MONTHLY - revenueThisMonth) / avgDeal / daysRemaining);
   const callsPerClose = stats.closes > 0 ? (stats.totalCalls / stats.closes).toFixed(1) : "—";
-
   const filterLabel = FILTER_GROUPS.find(f => f.value === filterMode)?.label || "";
 
   const chip = (active: boolean, onClick: () => void, label: string) => (
     <button onClick={onClick} style={{
-      background: active ? WHITE : "transparent",
-      border: `1px solid ${active ? WHITE : BORDER}`,
+      background: active ? WHITE : "transparent", border: `1px solid ${active ? WHITE : BORDER}`,
       color: active ? BG : GRAY, borderRadius: 6, padding: "4px 11px", fontSize: 10, cursor: "pointer",
       fontFamily: "'DM Mono', monospace", letterSpacing: "0.06em", transition: "all 0.12s",
     }}>{label}</button>
   );
+
+  const inputStyle: React.CSSProperties = {
+    background: "#111", border: `1px solid ${BORDER}`, color: WHITE, borderRadius: 6,
+    padding: "6px 10px", fontSize: 11, fontFamily: "'DM Mono'", width: "100%", outline: "none",
+  };
+
+  function startEdit(row: Row) {
+    setEditingRow(row.id);
+    setEditVals({
+      totalCalls: String(row.totalCalls), shows: String(row.shows),
+      noShows: String(row.noShows), closes: String(row.closes), revenue: String(row.revenue),
+    });
+  }
+
+  function saveEdit(rowId: string) {
+    const newOverrides = overrides.filter(o => o.id !== rowId);
+    FIELDS.forEach(field => {
+      if (editVals[field] !== undefined) {
+        newOverrides.push({ id: rowId, field, value: num(editVals[field]) });
+      }
+    });
+    setOverrides(newOverrides);
+    setEditingRow(null);
+  }
+
+  function addManualEntry() {
+    if (!newEntry.rep || !newEntry.date) return;
+    const entry: ManualEntry = {
+      id: `manual_${Date.now()}`,
+      date: newEntry.date, rep: newEntry.rep,
+      totalCalls: num(newEntry.totalCalls), shows: num(newEntry.shows),
+      noShows: num(newEntry.noShows), closes: num(newEntry.closes), revenue: num(newEntry.revenue),
+    };
+    setManualEntries([...manualEntries, entry]);
+    setNewEntry({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", revenue: "" });
+  }
+
+  const adminTabStyle = (active: boolean): React.CSSProperties => ({
+    background: active ? WHITE : "transparent", border: `1px solid ${active ? WHITE : BORDER}`,
+    color: active ? BG : GRAY, borderRadius: 6, padding: "5px 14px", fontSize: 10,
+    cursor: "pointer", fontFamily: "'DM Mono'", letterSpacing: "0.08em",
+  });
 
   return (
     <div style={{ fontFamily: "'DM Mono', monospace", background: BG, minHeight: "100vh", color: WHITE }}>
@@ -258,20 +340,185 @@ export default function ReserveDashboard() {
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
         @keyframes up { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
         .fade { animation: up 0.35s ease both; }
+        input::placeholder { color: #444; }
       `}</style>
 
-      <nav style={{ borderBottom: `1px solid ${BORDER}`, height: 50, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", position: "sticky", top: 0, zIndex: 20, background: "rgba(0,0,0,0.9)", backdropFilter: "blur(16px)" }}>
+      {/* NAV */}
+      <nav style={{ borderBottom: `1px solid ${BORDER}`, height: 50, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", position: "sticky", top: 0, zIndex: 20, background: "rgba(0,0,0,0.95)", backdropFilter: "blur(16px)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 7, height: 7, borderRadius: "50%", background: GREEN, boxShadow: `0 0 10px ${GREEN}80`, animation: "blink 2.5s ease infinite" }} />
           <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 13, letterSpacing: "0.14em" }}>THE RESERVE</span>
           <span style={{ color: BORDER }}>·</span>
           <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em" }}>SALES DASHBOARD</span>
         </div>
-        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-          {lastRefresh && <span style={{ fontSize: 9, color: GRAY }}>{lastRefresh.toLocaleTimeString()}</span>}
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          {lastRefresh && <span style={{ fontSize: 9, color: "#666" }}>{lastRefresh.toLocaleTimeString()}</span>}
+          <button onClick={() => setShowAdmin(!showAdmin)} style={{ background: showAdmin ? "#1a1a1a" : "transparent", border: `1px solid ${showAdmin ? WHITE : BORDER}`, color: showAdmin ? WHITE : "#666", borderRadius: 6, padding: "4px 10px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'", letterSpacing: "0.1em" }}>⚙ ADMIN</button>
           <button onClick={fetchData} style={{ background: "transparent", border: `1px solid ${BORDER}`, color: GRAY, borderRadius: 6, padding: "4px 10px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'", letterSpacing: "0.1em" }}>↻ SYNC</button>
         </div>
       </nav>
+
+      {/* ADMIN PANEL */}
+      {showAdmin && (
+        <div style={{ borderBottom: `1px solid ${BORDER}`, background: "#050505", padding: "20px 24px" }}>
+          {!adminAuthed ? (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", maxWidth: 400 }}>
+              <input
+                type="password" placeholder="Enter admin password" value={adminPwInput}
+                onChange={e => setAdminPwInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    if (adminPwInput === ADMIN_PASSWORD) { setAdminAuthed(true); setAdminPwError(false); }
+                    else { setAdminPwError(true); }
+                  }
+                }}
+                style={{ ...inputStyle, flex: 1 }}
+              />
+              <button onClick={() => {
+                if (adminPwInput === ADMIN_PASSWORD) { setAdminAuthed(true); setAdminPwError(false); }
+                else setAdminPwError(true);
+              }} style={{ background: WHITE, color: BG, border: "none", borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700 }}>ENTER</button>
+              {adminPwError && <span style={{ fontSize: 10, color: RED }}>Wrong password</span>}
+            </div>
+          ) : (
+            <div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 18, alignItems: "center" }}>
+                <span style={{ fontSize: 9, color: GREEN, letterSpacing: "0.14em", marginRight: 8 }}>✓ ADMIN ACCESS</span>
+                <button style={adminTabStyle(activeAdminTab === "overrides")} onClick={() => setActiveAdminTab("overrides")}>EDIT ROWS</button>
+                <button style={adminTabStyle(activeAdminTab === "manual")} onClick={() => setActiveAdminTab("manual")}>ADD ENTRY</button>
+                <button style={adminTabStyle(activeAdminTab === "settings")} onClick={() => setActiveAdminTab("settings")}>SETTINGS</button>
+                <button onClick={() => { setAdminAuthed(false); setShowAdmin(false); }} style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${BORDER}`, color: "#666", borderRadius: 6, padding: "5px 12px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>LOCK</button>
+              </div>
+
+              {/* EDIT ROWS TAB */}
+              {activeAdminTab === "overrides" && (
+                <div>
+                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>EDIT / OVERRIDE FORM SUBMISSIONS</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
+                    {rawRows.length === 0 && <div style={{ fontSize: 11, color: "#555" }}>No form submissions yet.</div>}
+                    {rawRows.map(row => {
+                      const overridden = applyOverrides([row], overrides)[0];
+                      const isEditing = editingRow === row.id;
+                      return (
+                        <div key={row.id} style={{ background: "#0a0a0a", border: `1px solid ${isEditing ? WHITE + "44" : BORDER}`, borderRadius: 8, padding: "12px 14px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isEditing ? 12 : 0 }}>
+                            <div style={{ display: "flex", gap: 16 }}>
+                              <span style={{ fontSize: 11, fontWeight: 700, color: WHITE }}>{row.rep}</span>
+                              <span style={{ fontSize: 10, color: "#555" }}>{row.date}</span>
+                            </div>
+                            {!isEditing ? (
+                              <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+                                {FIELDS.map(f => (
+                                  <span key={f} style={{ fontSize: 10, color: overrides.find(o => o.id === row.id && o.field === f) ? GREEN : "#666" }}>
+                                    {f}: <span style={{ color: WHITE }}>{(overridden as any)[f]}</span>
+                                  </span>
+                                ))}
+                                <button onClick={() => startEdit(row)} style={{ background: "transparent", border: `1px solid ${BORDER}`, color: GRAY, borderRadius: 5, padding: "3px 10px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>EDIT</button>
+                              </div>
+                            ) : (
+                              <div style={{ display: "flex", gap: 8 }}>
+                                <button onClick={() => saveEdit(row.id)} style={{ background: GREEN, color: BG, border: "none", borderRadius: 5, padding: "4px 12px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700 }}>SAVE</button>
+                                <button onClick={() => setEditingRow(null)} style={{ background: "transparent", border: `1px solid ${BORDER}`, color: GRAY, borderRadius: 5, padding: "4px 10px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>CANCEL</button>
+                              </div>
+                            )}
+                          </div>
+                          {isEditing && (
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8 }}>
+                              {FIELDS.map(f => (
+                                <div key={f}>
+                                  <div style={{ fontSize: 8, color: "#555", letterSpacing: "0.1em", marginBottom: 4 }}>{f.toUpperCase()}</div>
+                                  <input
+                                    value={editVals[f] || ""}
+                                    onChange={e => setEditVals({ ...editVals, [f]: e.target.value })}
+                                    style={{ ...inputStyle }}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ADD MANUAL ENTRY TAB */}
+              {activeAdminTab === "manual" && (
+                <div>
+                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>ADD MANUAL ENTRY</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 8, marginBottom: 10 }}>
+                    {[
+                      { key: "date", label: "DATE", placeholder: "3/9/2026" },
+                      { key: "rep", label: "REP NAME", placeholder: "Cobe" },
+                      { key: "totalCalls", label: "TOTAL CALLS", placeholder: "0" },
+                      { key: "shows", label: "SHOW UPS", placeholder: "0" },
+                      { key: "noShows", label: "NO SHOWS", placeholder: "0" },
+                      { key: "closes", label: "CLOSES", placeholder: "0" },
+                      { key: "revenue", label: "CASH ($)", placeholder: "0" },
+                    ].map(({ key, label, placeholder }) => (
+                      <div key={key}>
+                        <div style={{ fontSize: 8, color: "#555", letterSpacing: "0.1em", marginBottom: 4 }}>{label}</div>
+                        <input
+                          value={(newEntry as any)[key]}
+                          placeholder={placeholder}
+                          onChange={e => setNewEntry({ ...newEntry, [key]: e.target.value })}
+                          style={inputStyle}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={addManualEntry} style={{ background: GREEN, color: BG, border: "none", borderRadius: 6, padding: "8px 20px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700, letterSpacing: "0.08em" }}>+ ADD ENTRY</button>
+
+                  {manualEntries.length > 0 && (
+                    <div style={{ marginTop: 16 }}>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.14em", marginBottom: 8 }}>MANUAL ENTRIES ({manualEntries.length})</div>
+                      {manualEntries.map(m => (
+                        <div key={m.id} style={{ display: "flex", gap: 16, alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
+                          <span style={{ fontSize: 11, color: WHITE, minWidth: 80 }}>{m.rep}</span>
+                          <span style={{ fontSize: 10, color: "#555", minWidth: 100 }}>{m.date}</span>
+                          {FIELDS.map(f => (
+                            <span key={f} style={{ fontSize: 10, color: "#666" }}>{f}: <span style={{ color: WHITE }}>{(m as any)[f]}</span></span>
+                          ))}
+                          <button onClick={() => setManualEntries(manualEntries.filter(e => e.id !== m.id))} style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${RED}44`, color: RED, borderRadius: 5, padding: "2px 8px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* SETTINGS TAB */}
+              {activeAdminTab === "settings" && (
+                <div>
+                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 16 }}>DASHBOARD SETTINGS</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, maxWidth: 600 }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>SEED REVENUE ($)</div>
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Pre-dashboard cash to include in this month</div>
+                      <input
+                        value={seedRevenue}
+                        onChange={e => setSeedRevenue(num(e.target.value))}
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>MONTHLY TARGET ($)</div>
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Currently hardcoded at $110,000</div>
+                      <input value={TARGET_MONTHLY} disabled style={{ ...inputStyle, opacity: 0.4 }} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>CLEAR OVERRIDES</div>
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Reset all row edits back to original</div>
+                      <button onClick={() => setOverrides([])} style={{ background: RED + "22", border: `1px solid ${RED}44`, color: RED, borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'" }}>CLEAR ALL</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
 
@@ -325,10 +572,10 @@ export default function ReserveDashboard() {
             </div>
           </div>
 
-          {/* PACING CARD — always shows current month */}
+          {/* PACING CARD */}
           <div className="fade" style={{ background: SURFACE, border: `1px solid ${isAhead ? GREEN + "44" : RED + "44"}`, borderRadius: 14, padding: "20px 26px", animationDelay: "0.06s", position: "relative", overflow: "hidden" }}>
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: isAhead ? GREEN : RED }} />
-            <div style={{ fontSize: 8, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>MONTH PACING — MARCH {nowDate.getFullYear()}</div>
+            <div style={{ fontSize: 8, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>MONTH PACING — {nowDate.toLocaleString("default", { month: "long" }).toUpperCase()} {nowDate.getFullYear()}</div>
             <div style={{ display: "flex", alignItems: "stretch" }}>
               <div style={{ minWidth: 160, display: "flex", flexDirection: "column", justifyContent: "center", gap: 4, paddingRight: 28, borderRight: `1px solid ${BORDER}` }}>
                 <div style={{ display: "inline-flex", alignItems: "center", gap: 7, background: isAhead ? GREEN + "18" : RED + "18", border: `1px solid ${isAhead ? GREEN + "55" : RED + "55"}`, borderRadius: 6, padding: "5px 10px", width: "fit-content" }}>
@@ -384,7 +631,7 @@ export default function ReserveDashboard() {
           <div className="fade" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, animationDelay: "0.12s" }}>
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: "20px 22px" }}>
               <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 18 }}>REP LEADERBOARD — {filterLabel}</div>
-              {reps.length === 0 && <div style={{ fontSize: 11, color: GRAY }}>No data for this period yet.</div>}
+              {reps.length === 0 && <div style={{ fontSize: 11, color: "#444" }}>No data for this period yet.</div>}
               <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
                 {reps.map((r, i) => {
                   const cr = pct(r.closes, r.shows);
