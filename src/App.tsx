@@ -3,6 +3,9 @@ import { useState, useEffect, useCallback } from "react";
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRK2-o2zUYccClexMlZlYQRqcAu5BuCECMTnI9UYmZu0xKpqWdg2IclcX-sroV1ieWUdOH0gahoBwOy/pub?gid=306047208&single=true&output=csv";
 const REFRESH_INTERVAL = 60000;
 const ADMIN_PASSWORD = "reserve2026";
+const STORAGE_KEY_OVERRIDES = "reserve_overrides";
+const STORAGE_KEY_MANUAL = "reserve_manual_entries";
+const STORAGE_KEY_SEED = "reserve_seed_revenue";
 
 const COLS: Record<string, string> = {
   date: "Timestamp",
@@ -40,28 +43,26 @@ interface ManualEntry {
   shows: number; noShows: number; closes: number; revenue: number; installment: number;
 }
 
+function loadLS<T>(key: string, fallback: T): T {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+}
+function saveLS(key: string, value: unknown) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
 function getDateRange(mode: FilterMode): { start: Date; end: Date } {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   switch (mode) {
-    case "today":
-      return { start: today, end: new Date(today.getTime() + 86400000 - 1) };
+    case "today": return { start: today, end: new Date(today.getTime() + 86400000 - 1) };
     case "this_week": {
       const day = today.getDay();
       const start = new Date(today); start.setDate(today.getDate() - day);
       const end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23,59,59);
       return { start, end };
     }
-    case "this_month":
-      return {
-        start: new Date(now.getFullYear(), now.getMonth(), 1),
-        end: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59)
-      };
-    case "last_month":
-      return {
-        start: new Date(now.getFullYear(), now.getMonth() - 1, 1),
-        end: new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59)
-      };
+    case "this_month": return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59) };
+    case "last_month": return { start: new Date(now.getFullYear(), now.getMonth() - 1, 1), end: new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59) };
     default: {
       const days = parseInt(mode);
       const start = new Date(today); start.setDate(today.getDate() - days);
@@ -115,7 +116,7 @@ function repStats(rows: Row[]) {
     if (!map[name]) map[name] = { rep: name, totalCalls: 0, shows: 0, noShows: 0, closes: 0, revenue: 0, installment: 0 };
     (["totalCalls","shows","noShows","closes","revenue","installment"]).forEach(k => { map[name][k] += (r as any)[k]; });
   });
-  return Object.values(map).sort((a, b) => b.revenue - a.revenue);
+  return Object.values(map).sort((a, b) => (b.revenue + b.installment) - (a.revenue + a.installment));
 }
 
 function dailyTrend(rows: Row[]) {
@@ -123,10 +124,8 @@ function dailyTrend(rows: Row[]) {
   rows.forEach(r => {
     const d = r.date ? r.date.split(",")[0].trim() : "?";
     if (!map[d]) map[d] = { date: d, closes: 0, revenue: 0, shows: 0, installment: 0 };
-    map[d].closes += r.closes;
-    map[d].revenue += r.revenue;
-    map[d].shows += r.shows;
-    map[d].installment += r.installment;
+    map[d].closes += r.closes; map[d].revenue += r.revenue;
+    map[d].shows += r.shows; map[d].installment += r.installment;
   });
   return Object.values(map).sort((a, b) => a.date.localeCompare(b.date)).slice(-10);
 }
@@ -147,10 +146,7 @@ function SparkBars({ data, valueKey, color = GREEN }: { data: any[]; valueKey: s
   return (
     <div style={{ display: "flex", gap: 4, alignItems: "flex-end", height: 40 }}>
       {vals.map((v, i) => (
-        <div key={i} style={{
-          flex: 1, background: i === vals.length - 1 ? color : color + "33",
-          borderRadius: 3, height: `${Math.max((v / max) * 100, 5)}%`, transition: "height 0.5s ease",
-        }} />
+        <div key={i} style={{ flex: 1, background: i === vals.length - 1 ? color : color + "33", borderRadius: 3, height: `${Math.max((v / max) * 100, 5)}%`, transition: "height 0.5s ease" }} />
       ))}
     </div>
   );
@@ -186,14 +182,21 @@ export default function ReserveDashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [filterRep, setFilterRep] = useState("All");
   const [filterMode, setFilterMode] = useState<FilterMode>("this_month");
-  const [seedRevenue, setSeedRevenue] = useState(11700);
+
+  // Persistent state — loaded from localStorage on mount
+  const [seedRevenue, setSeedRevenue] = useState<number>(() => loadLS(STORAGE_KEY_SEED, 11700));
+  const [overrides, setOverrides] = useState<Override[]>(() => loadLS(STORAGE_KEY_OVERRIDES, []));
+  const [manualEntries, setManualEntries] = useState<ManualEntry[]>(() => loadLS(STORAGE_KEY_MANUAL, []));
+
+  // Save to localStorage whenever these change
+  useEffect(() => { saveLS(STORAGE_KEY_OVERRIDES, overrides); }, [overrides]);
+  useEffect(() => { saveLS(STORAGE_KEY_MANUAL, manualEntries); }, [manualEntries]);
+  useEffect(() => { saveLS(STORAGE_KEY_SEED, seedRevenue); }, [seedRevenue]);
 
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminAuthed, setAdminAuthed] = useState(false);
   const [adminPwInput, setAdminPwInput] = useState("");
   const [adminPwError, setAdminPwError] = useState(false);
-  const [overrides, setOverrides] = useState<Override[]>([]);
-  const [manualEntries, setManualEntries] = useState<ManualEntry[]>([]);
   const [editingRow, setEditingRow] = useState<string | null>(null);
   const [editVals, setEditVals] = useState<Record<string, string>>({});
   const [newEntry, setNewEntry] = useState({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", installment: "", revenue: "" });
@@ -212,15 +215,10 @@ export default function ReserveDashboard() {
       const text = await res.text();
       const parsed = parseCSV(text);
       const normalized: Row[] = parsed.map((r, i) => ({
-        id: `row_${i}`,
-        date: getVal(r, "date"),
-        rep: getVal(r, "rep"),
-        totalCalls: num(getVal(r, "totalCalls")),
-        shows: num(getVal(r, "shows")),
-        noShows: num(getVal(r, "noShows")),
-        closes: num(getVal(r, "closes")),
-        installment: num(getVal(r, "installment")),
-        revenue: num(getVal(r, "revenue")),
+        id: `row_${i}`, date: getVal(r, "date"), rep: getVal(r, "rep"),
+        totalCalls: num(getVal(r, "totalCalls")), shows: num(getVal(r, "shows")),
+        noShows: num(getVal(r, "noShows")), closes: num(getVal(r, "closes")),
+        installment: num(getVal(r, "installment")), revenue: num(getVal(r, "revenue")),
       }));
       setRawRows(normalized); setError(null);
     } catch (e) { setError((e as Error).message); }
@@ -233,11 +231,7 @@ export default function ReserveDashboard() {
     return () => clearInterval(t);
   }, [fetchData]);
 
-  const allRows: Row[] = [
-    ...applyOverrides(rawRows, overrides),
-    ...manualEntries.map(m => ({ ...m })),
-  ];
-
+  const allRows: Row[] = [...applyOverrides(rawRows, overrides), ...manualEntries];
   const { start, end } = getDateRange(filterMode);
   const isThisMonth = filterMode === "this_month";
 
@@ -309,9 +303,7 @@ export default function ReserveDashboard() {
 
   function saveEdit(rowId: string) {
     const newOverrides = overrides.filter(o => o.id !== rowId);
-    FIELDS.forEach(field => {
-      if (editVals[field] !== undefined) newOverrides.push({ id: rowId, field, value: num(editVals[field]) });
-    });
+    FIELDS.forEach(field => { if (editVals[field] !== undefined) newOverrides.push({ id: rowId, field, value: num(editVals[field]) }); });
     setOverrides(newOverrides);
     setEditingRow(null);
   }
@@ -375,23 +367,28 @@ export default function ReserveDashboard() {
                 <button style={adminTabStyle(activeAdminTab === "overrides")} onClick={() => setActiveAdminTab("overrides")}>EDIT ROWS</button>
                 <button style={adminTabStyle(activeAdminTab === "manual")} onClick={() => setActiveAdminTab("manual")}>ADD ENTRY</button>
                 <button style={adminTabStyle(activeAdminTab === "settings")} onClick={() => setActiveAdminTab("settings")}>SETTINGS</button>
-                <button onClick={() => { setAdminAuthed(false); setShowAdmin(false); }} style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${BORDER}`, color: "#666", borderRadius: 6, padding: "5px 12px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>LOCK</button>
+                <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 8, color: GREEN, letterSpacing: "0.1em" }}>● AUTO-SAVING</span>
+                  <button onClick={() => { setAdminAuthed(false); setShowAdmin(false); }} style={{ background: "transparent", border: `1px solid ${BORDER}`, color: "#666", borderRadius: 6, padding: "5px 12px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>LOCK</button>
+                </div>
               </div>
 
               {activeAdminTab === "overrides" && (
                 <div>
-                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>EDIT / OVERRIDE FORM SUBMISSIONS</div>
+                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>EDIT / OVERRIDE FORM SUBMISSIONS — changes save permanently</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
                     {rawRows.length === 0 && <div style={{ fontSize: 11, color: "#555" }}>No form submissions yet.</div>}
                     {rawRows.map(row => {
                       const overridden = applyOverrides([row], overrides)[0];
                       const isEditing = editingRow === row.id;
+                      const hasOverride = overrides.some(o => o.id === row.id);
                       return (
-                        <div key={row.id} style={{ background: "#0a0a0a", border: `1px solid ${isEditing ? WHITE + "44" : BORDER}`, borderRadius: 8, padding: "12px 14px" }}>
+                        <div key={row.id} style={{ background: "#0a0a0a", border: `1px solid ${isEditing ? WHITE + "44" : hasOverride ? GREEN + "33" : BORDER}`, borderRadius: 8, padding: "12px 14px" }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isEditing ? 12 : 0 }}>
-                            <div style={{ display: "flex", gap: 16 }}>
+                            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
                               <span style={{ fontSize: 11, fontWeight: 700, color: WHITE }}>{row.rep}</span>
                               <span style={{ fontSize: 10, color: "#555" }}>{row.date}</span>
+                              {hasOverride && <span style={{ fontSize: 8, color: GREEN, letterSpacing: "0.1em" }}>EDITED</span>}
                             </div>
                             {!isEditing ? (
                               <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
@@ -401,6 +398,7 @@ export default function ReserveDashboard() {
                                   </span>
                                 ))}
                                 <button onClick={() => startEdit(row)} style={{ background: "transparent", border: `1px solid ${BORDER}`, color: GRAY, borderRadius: 5, padding: "3px 10px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>EDIT</button>
+                                {hasOverride && <button onClick={() => setOverrides(overrides.filter(o => o.id !== row.id))} style={{ background: "transparent", border: `1px solid ${RED}44`, color: RED, borderRadius: 5, padding: "3px 8px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>RESET</button>}
                               </div>
                             ) : (
                               <div style={{ display: "flex", gap: 8 }}>
@@ -428,7 +426,7 @@ export default function ReserveDashboard() {
 
               {activeAdminTab === "manual" && (
                 <div>
-                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>ADD MANUAL ENTRY</div>
+                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>ADD MANUAL ENTRY — saves permanently</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(8,1fr)", gap: 8, marginBottom: 10 }}>
                     {[
                       { key: "date", label: "DATE", placeholder: "3/9/2026" },
@@ -450,7 +448,7 @@ export default function ReserveDashboard() {
                   <button onClick={addManualEntry} style={{ background: GREEN, color: BG, border: "none", borderRadius: 6, padding: "8px 20px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700, letterSpacing: "0.08em" }}>+ ADD ENTRY</button>
                   {manualEntries.length > 0 && (
                     <div style={{ marginTop: 16 }}>
-                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.14em", marginBottom: 8 }}>MANUAL ENTRIES ({manualEntries.length})</div>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.14em", marginBottom: 8 }}>SAVED MANUAL ENTRIES ({manualEntries.length})</div>
                       {manualEntries.map(m => (
                         <div key={m.id} style={{ display: "flex", gap: 16, alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
                           <span style={{ fontSize: 11, color: WHITE, minWidth: 80 }}>{m.rep}</span>
@@ -466,7 +464,7 @@ export default function ReserveDashboard() {
 
               {activeAdminTab === "settings" && (
                 <div>
-                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 16 }}>DASHBOARD SETTINGS</div>
+                  <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 16 }}>DASHBOARD SETTINGS — all changes save permanently</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, maxWidth: 600 }}>
                     <div>
                       <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>SEED REVENUE ($)</div>
@@ -479,9 +477,13 @@ export default function ReserveDashboard() {
                       <input value={TARGET_MONTHLY} disabled style={{ ...inputStyle, opacity: 0.4 }} />
                     </div>
                     <div>
-                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>CLEAR OVERRIDES</div>
-                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Reset all row edits</div>
-                      <button onClick={() => setOverrides([])} style={{ background: RED + "22", border: `1px solid ${RED}44`, color: RED, borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'" }}>CLEAR ALL</button>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>NUCLEAR RESET</div>
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Wipes ALL admin changes permanently</div>
+                      <button onClick={() => {
+                        if (confirm("This will delete ALL overrides and manual entries permanently. Are you sure?")) {
+                          setOverrides([]); setManualEntries([]); setSeedRevenue(0);
+                        }
+                      }} style={{ background: RED + "22", border: `1px solid ${RED}44`, color: RED, borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'" }}>RESET ALL</button>
                     </div>
                   </div>
                 </div>
