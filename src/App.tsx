@@ -11,7 +11,8 @@ const COLS: Record<string, string> = {
   noShows: "No Shows",
   shows: "Show ups",
   closes: "Total Deals Closed",
-  revenue: "Cash Collected",
+  installment: "Installment Cash Collected",
+  revenue: "Total NEW Cash Collected",
 };
 
 const GREEN = "#22C55E";
@@ -28,17 +29,15 @@ type FilterMode = "today" | "this_week" | "this_month" | "last_month" | "7D" | "
 
 interface Row {
   id: string; date: string; rep: string; totalCalls: number;
-  shows: number; noShows: number; closes: number; revenue: number;
+  shows: number; noShows: number; closes: number; revenue: number; installment: number;
 }
 interface Stats {
-  totalCalls: number; shows: number; noShows: number; closes: number; revenue: number;
+  totalCalls: number; shows: number; noShows: number; closes: number; revenue: number; installment: number;
 }
-interface Override {
-  id: string; field: string; value: number;
-}
+interface Override { id: string; field: string; value: number; }
 interface ManualEntry {
   id: string; date: string; rep: string; totalCalls: number;
-  shows: number; noShows: number; closes: number; revenue: number;
+  shows: number; noShows: number; closes: number; revenue: number; installment: number;
 }
 
 function getDateRange(mode: FilterMode): { start: Date; end: Date } {
@@ -104,6 +103,7 @@ function computeStats(rows: Row[], seedRevenue = 0): Stats {
     shows: rows.reduce((s, r) => s + r.shows, 0),
     noShows: rows.reduce((s, r) => s + r.noShows, 0),
     closes: rows.reduce((s, r) => s + r.closes, 0),
+    installment: rows.reduce((s, r) => s + r.installment, 0),
     revenue: rows.reduce((s, r) => s + r.revenue, seedRevenue),
   };
 }
@@ -112,20 +112,21 @@ function repStats(rows: Row[]) {
   const map: Record<string, any> = {};
   rows.forEach(r => {
     const name = r.rep || "Unknown";
-    if (!map[name]) map[name] = { rep: name, totalCalls: 0, shows: 0, noShows: 0, closes: 0, revenue: 0 };
-    (["totalCalls","shows","noShows","closes","revenue"]).forEach(k => { map[name][k] += (r as any)[k]; });
+    if (!map[name]) map[name] = { rep: name, totalCalls: 0, shows: 0, noShows: 0, closes: 0, revenue: 0, installment: 0 };
+    (["totalCalls","shows","noShows","closes","revenue","installment"]).forEach(k => { map[name][k] += (r as any)[k]; });
   });
   return Object.values(map).sort((a, b) => b.revenue - a.revenue);
 }
 
 function dailyTrend(rows: Row[]) {
-  const map: Record<string, { date: string; closes: number; revenue: number; shows: number }> = {};
+  const map: Record<string, { date: string; closes: number; revenue: number; shows: number; installment: number }> = {};
   rows.forEach(r => {
     const d = r.date ? r.date.split(",")[0].trim() : "?";
-    if (!map[d]) map[d] = { date: d, closes: 0, revenue: 0, shows: 0 };
+    if (!map[d]) map[d] = { date: d, closes: 0, revenue: 0, shows: 0, installment: 0 };
     map[d].closes += r.closes;
     map[d].revenue += r.revenue;
     map[d].shows += r.shows;
+    map[d].installment += r.installment;
   });
   return Object.values(map).sort((a, b) => a.date.localeCompare(b.date)).slice(-10);
 }
@@ -176,7 +177,7 @@ const FILTER_GROUPS = [
   { label: "90D", value: "90D" as FilterMode },
 ];
 
-const FIELDS = ["totalCalls","shows","noShows","closes","revenue"];
+const FIELDS = ["totalCalls","shows","noShows","closes","installment","revenue"];
 
 export default function ReserveDashboard() {
   const [rawRows, setRawRows] = useState<Row[]>([]);
@@ -187,7 +188,6 @@ export default function ReserveDashboard() {
   const [filterMode, setFilterMode] = useState<FilterMode>("this_month");
   const [seedRevenue, setSeedRevenue] = useState(11700);
 
-  // Admin state
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminAuthed, setAdminAuthed] = useState(false);
   const [adminPwInput, setAdminPwInput] = useState("");
@@ -196,7 +196,7 @@ export default function ReserveDashboard() {
   const [manualEntries, setManualEntries] = useState<ManualEntry[]>([]);
   const [editingRow, setEditingRow] = useState<string | null>(null);
   const [editVals, setEditVals] = useState<Record<string, string>>({});
-  const [newEntry, setNewEntry] = useState({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", revenue: "" });
+  const [newEntry, setNewEntry] = useState({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", installment: "", revenue: "" });
   const [activeAdminTab, setActiveAdminTab] = useState<"overrides"|"manual"|"settings">("overrides");
 
   useEffect(() => {
@@ -219,6 +219,7 @@ export default function ReserveDashboard() {
         shows: num(getVal(r, "shows")),
         noShows: num(getVal(r, "noShows")),
         closes: num(getVal(r, "closes")),
+        installment: num(getVal(r, "installment")),
         revenue: num(getVal(r, "revenue")),
       }));
       setRawRows(normalized); setError(null);
@@ -249,16 +250,17 @@ export default function ReserveDashboard() {
 
   const seedForFilter = isThisMonth ? seedRevenue : 0;
   const stats = computeStats(filtered, seedForFilter);
+  const totalCash = stats.revenue + stats.installment;
   const reps = repStats(filtered);
   const trend = dailyTrend(filtered);
   const allReps = ["All", ...Array.from(new Set(allRows.map(r => r.rep).filter(Boolean)))];
 
-  const monthPct = pct(stats.revenue, TARGET_MONTHLY);
+  const monthPct = pct(totalCash, TARGET_MONTHLY);
   const showRate = pct(stats.shows, stats.totalCalls);
   const closeRate = pct(stats.closes, stats.shows);
   const avgDeal = stats.closes ? Math.round(stats.revenue / stats.closes) : 6000;
-  const closesNeeded = Math.max(0, Math.ceil((TARGET_MONTHLY - stats.revenue) / avgDeal));
-  const maxRepRev = Math.max(...reps.map(r => r.revenue), 1);
+  const closesNeeded = Math.max(0, Math.ceil((TARGET_MONTHLY - totalCash) / avgDeal));
+  const maxRepRev = Math.max(...reps.map(r => r.revenue + r.installment), 1);
 
   const nowDate = new Date();
   const totalDaysInMonth = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0).getDate();
@@ -270,7 +272,7 @@ export default function ReserveDashboard() {
   const monthEnd = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59);
   const monthRows = allRows.filter(r => { if (!r.date) return false; const d = new Date(r.date); return d >= monthStart && d <= monthEnd; });
   const monthStats = computeStats(monthRows, seedRevenue);
-  const revenueThisMonth = monthStats.revenue;
+  const revenueThisMonth = monthStats.revenue + monthStats.installment;
   const closesThisMonth = monthStats.closes || 0;
 
   const dailyActual = revenueThisMonth / daysElapsed;
@@ -300,17 +302,15 @@ export default function ReserveDashboard() {
   function startEdit(row: Row) {
     setEditingRow(row.id);
     setEditVals({
-      totalCalls: String(row.totalCalls), shows: String(row.shows),
-      noShows: String(row.noShows), closes: String(row.closes), revenue: String(row.revenue),
+      totalCalls: String(row.totalCalls), shows: String(row.shows), noShows: String(row.noShows),
+      closes: String(row.closes), installment: String(row.installment), revenue: String(row.revenue),
     });
   }
 
   function saveEdit(rowId: string) {
     const newOverrides = overrides.filter(o => o.id !== rowId);
     FIELDS.forEach(field => {
-      if (editVals[field] !== undefined) {
-        newOverrides.push({ id: rowId, field, value: num(editVals[field]) });
-      }
+      if (editVals[field] !== undefined) newOverrides.push({ id: rowId, field, value: num(editVals[field]) });
     });
     setOverrides(newOverrides);
     setEditingRow(null);
@@ -319,13 +319,12 @@ export default function ReserveDashboard() {
   function addManualEntry() {
     if (!newEntry.rep || !newEntry.date) return;
     const entry: ManualEntry = {
-      id: `manual_${Date.now()}`,
-      date: newEntry.date, rep: newEntry.rep,
-      totalCalls: num(newEntry.totalCalls), shows: num(newEntry.shows),
-      noShows: num(newEntry.noShows), closes: num(newEntry.closes), revenue: num(newEntry.revenue),
+      id: `manual_${Date.now()}`, date: newEntry.date, rep: newEntry.rep,
+      totalCalls: num(newEntry.totalCalls), shows: num(newEntry.shows), noShows: num(newEntry.noShows),
+      closes: num(newEntry.closes), installment: num(newEntry.installment), revenue: num(newEntry.revenue),
     };
     setManualEntries([...manualEntries, entry]);
-    setNewEntry({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", revenue: "" });
+    setNewEntry({ date: "", rep: "", totalCalls: "", shows: "", noShows: "", closes: "", installment: "", revenue: "" });
   }
 
   const adminTabStyle = (active: boolean): React.CSSProperties => ({
@@ -343,7 +342,6 @@ export default function ReserveDashboard() {
         input::placeholder { color: #444; }
       `}</style>
 
-      {/* NAV */}
       <nav style={{ borderBottom: `1px solid ${BORDER}`, height: 50, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 24px", position: "sticky", top: 0, zIndex: 20, background: "rgba(0,0,0,0.95)", backdropFilter: "blur(16px)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 7, height: 7, borderRadius: "50%", background: GREEN, boxShadow: `0 0 10px ${GREEN}80`, animation: "blink 2.5s ease infinite" }} />
@@ -358,26 +356,16 @@ export default function ReserveDashboard() {
         </div>
       </nav>
 
-      {/* ADMIN PANEL */}
       {showAdmin && (
         <div style={{ borderBottom: `1px solid ${BORDER}`, background: "#050505", padding: "20px 24px" }}>
           {!adminAuthed ? (
             <div style={{ display: "flex", gap: 10, alignItems: "center", maxWidth: 400 }}>
-              <input
-                type="password" placeholder="Enter admin password" value={adminPwInput}
+              <input type="password" placeholder="Enter admin password" value={adminPwInput}
                 onChange={e => setAdminPwInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === "Enter") {
-                    if (adminPwInput === ADMIN_PASSWORD) { setAdminAuthed(true); setAdminPwError(false); }
-                    else { setAdminPwError(true); }
-                  }
-                }}
-                style={{ ...inputStyle, flex: 1 }}
-              />
-              <button onClick={() => {
-                if (adminPwInput === ADMIN_PASSWORD) { setAdminAuthed(true); setAdminPwError(false); }
-                else setAdminPwError(true);
-              }} style={{ background: WHITE, color: BG, border: "none", borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700 }}>ENTER</button>
+                onKeyDown={e => { if (e.key === "Enter") { if (adminPwInput === ADMIN_PASSWORD) { setAdminAuthed(true); setAdminPwError(false); } else setAdminPwError(true); }}}
+                style={{ ...inputStyle, flex: 1 }} />
+              <button onClick={() => { if (adminPwInput === ADMIN_PASSWORD) { setAdminAuthed(true); setAdminPwError(false); } else setAdminPwError(true); }}
+                style={{ background: WHITE, color: BG, border: "none", borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700 }}>ENTER</button>
               {adminPwError && <span style={{ fontSize: 10, color: RED }}>Wrong password</span>}
             </div>
           ) : (
@@ -390,7 +378,6 @@ export default function ReserveDashboard() {
                 <button onClick={() => { setAdminAuthed(false); setShowAdmin(false); }} style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${BORDER}`, color: "#666", borderRadius: 6, padding: "5px 12px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>LOCK</button>
               </div>
 
-              {/* EDIT ROWS TAB */}
               {activeAdminTab === "overrides" && (
                 <div>
                   <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>EDIT / OVERRIDE FORM SUBMISSIONS</div>
@@ -407,7 +394,7 @@ export default function ReserveDashboard() {
                               <span style={{ fontSize: 10, color: "#555" }}>{row.date}</span>
                             </div>
                             {!isEditing ? (
-                              <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+                              <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
                                 {FIELDS.map(f => (
                                   <span key={f} style={{ fontSize: 10, color: overrides.find(o => o.id === row.id && o.field === f) ? GREEN : "#666" }}>
                                     {f}: <span style={{ color: WHITE }}>{(overridden as any)[f]}</span>
@@ -423,15 +410,11 @@ export default function ReserveDashboard() {
                             )}
                           </div>
                           {isEditing && (
-                            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 8 }}>
                               {FIELDS.map(f => (
                                 <div key={f}>
                                   <div style={{ fontSize: 8, color: "#555", letterSpacing: "0.1em", marginBottom: 4 }}>{f.toUpperCase()}</div>
-                                  <input
-                                    value={editVals[f] || ""}
-                                    onChange={e => setEditVals({ ...editVals, [f]: e.target.value })}
-                                    style={{ ...inputStyle }}
-                                  />
+                                  <input value={editVals[f] || ""} onChange={e => setEditVals({ ...editVals, [f]: e.target.value })} style={inputStyle} />
                                 </div>
                               ))}
                             </div>
@@ -443,11 +426,10 @@ export default function ReserveDashboard() {
                 </div>
               )}
 
-              {/* ADD MANUAL ENTRY TAB */}
               {activeAdminTab === "manual" && (
                 <div>
                   <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>ADD MANUAL ENTRY</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 8, marginBottom: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(8,1fr)", gap: 8, marginBottom: 10 }}>
                     {[
                       { key: "date", label: "DATE", placeholder: "3/9/2026" },
                       { key: "rep", label: "REP NAME", placeholder: "Cobe" },
@@ -455,21 +437,17 @@ export default function ReserveDashboard() {
                       { key: "shows", label: "SHOW UPS", placeholder: "0" },
                       { key: "noShows", label: "NO SHOWS", placeholder: "0" },
                       { key: "closes", label: "CLOSES", placeholder: "0" },
-                      { key: "revenue", label: "CASH ($)", placeholder: "0" },
+                      { key: "installment", label: "INSTALLMENT $", placeholder: "0" },
+                      { key: "revenue", label: "NEW CASH $", placeholder: "0" },
                     ].map(({ key, label, placeholder }) => (
                       <div key={key}>
                         <div style={{ fontSize: 8, color: "#555", letterSpacing: "0.1em", marginBottom: 4 }}>{label}</div>
-                        <input
-                          value={(newEntry as any)[key]}
-                          placeholder={placeholder}
-                          onChange={e => setNewEntry({ ...newEntry, [key]: e.target.value })}
-                          style={inputStyle}
-                        />
+                        <input value={(newEntry as any)[key]} placeholder={placeholder}
+                          onChange={e => setNewEntry({ ...newEntry, [key]: e.target.value })} style={inputStyle} />
                       </div>
                     ))}
                   </div>
                   <button onClick={addManualEntry} style={{ background: GREEN, color: BG, border: "none", borderRadius: 6, padding: "8px 20px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'", fontWeight: 700, letterSpacing: "0.08em" }}>+ ADD ENTRY</button>
-
                   {manualEntries.length > 0 && (
                     <div style={{ marginTop: 16 }}>
                       <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.14em", marginBottom: 8 }}>MANUAL ENTRIES ({manualEntries.length})</div>
@@ -477,9 +455,7 @@ export default function ReserveDashboard() {
                         <div key={m.id} style={{ display: "flex", gap: 16, alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${BORDER}` }}>
                           <span style={{ fontSize: 11, color: WHITE, minWidth: 80 }}>{m.rep}</span>
                           <span style={{ fontSize: 10, color: "#555", minWidth: 100 }}>{m.date}</span>
-                          {FIELDS.map(f => (
-                            <span key={f} style={{ fontSize: 10, color: "#666" }}>{f}: <span style={{ color: WHITE }}>{(m as any)[f]}</span></span>
-                          ))}
+                          {FIELDS.map(f => <span key={f} style={{ fontSize: 10, color: "#666" }}>{f}: <span style={{ color: WHITE }}>{(m as any)[f]}</span></span>)}
                           <button onClick={() => setManualEntries(manualEntries.filter(e => e.id !== m.id))} style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${RED}44`, color: RED, borderRadius: 5, padding: "2px 8px", fontSize: 9, cursor: "pointer", fontFamily: "'DM Mono'" }}>✕</button>
                         </div>
                       ))}
@@ -488,28 +464,23 @@ export default function ReserveDashboard() {
                 </div>
               )}
 
-              {/* SETTINGS TAB */}
               {activeAdminTab === "settings" && (
                 <div>
                   <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 16 }}>DASHBOARD SETTINGS</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16, maxWidth: 600 }}>
                     <div>
                       <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>SEED REVENUE ($)</div>
-                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Pre-dashboard cash to include in this month</div>
-                      <input
-                        value={seedRevenue}
-                        onChange={e => setSeedRevenue(num(e.target.value))}
-                        style={inputStyle}
-                      />
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Pre-dashboard cash for this month</div>
+                      <input value={seedRevenue} onChange={e => setSeedRevenue(num(e.target.value))} style={inputStyle} />
                     </div>
                     <div>
-                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>MONTHLY TARGET ($)</div>
-                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Currently hardcoded at $110,000</div>
+                      <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>MONTHLY TARGET</div>
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Hardcoded at $110,000</div>
                       <input value={TARGET_MONTHLY} disabled style={{ ...inputStyle, opacity: 0.4 }} />
                     </div>
                     <div>
                       <div style={{ fontSize: 9, color: "#555", letterSpacing: "0.1em", marginBottom: 6 }}>CLEAR OVERRIDES</div>
-                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Reset all row edits back to original</div>
+                      <div style={{ fontSize: 8, color: "#444", marginBottom: 6 }}>Reset all row edits</div>
                       <button onClick={() => setOverrides([])} style={{ background: RED + "22", border: `1px solid ${RED}44`, color: RED, borderRadius: 6, padding: "7px 16px", fontSize: 10, cursor: "pointer", fontFamily: "'DM Mono'" }}>CLEAR ALL</button>
                     </div>
                   </div>
@@ -521,8 +492,6 @@ export default function ReserveDashboard() {
       )}
 
       <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
-
-        {/* FILTER BAR */}
         <div className="fade" style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 12, padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.12em", marginRight: 4 }}>VIEW</span>
@@ -542,16 +511,19 @@ export default function ReserveDashboard() {
           <div style={{ padding: 60, textAlign: "center", fontSize: 12, color: RED }}>{error}</div>
         ) : (<>
 
-          {/* GOAL CARD */}
           <div className="fade" style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: "22px 26px", position: "relative", overflow: "hidden", animationDelay: "0.04s" }}>
             <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `linear-gradient(90deg, ${monthPct >= 50 ? GREEN : RED}0A 0%, transparent 55%)`, width: `${monthPct}%`, transition: "width 1.2s ease" }} />
             <div style={{ position: "relative", display: "flex", gap: 36, alignItems: "center" }}>
               <div style={{ minWidth: 200 }}>
-                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 5 }}>CASH COLLECTED — {filterLabel}</div>
-                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 44, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1, color: WHITE }}>{money(stats.revenue)}</div>
+                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 5 }}>TOTAL CASH — {filterLabel}</div>
+                <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 44, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1, color: WHITE }}>{money(totalCash)}</div>
                 <div style={{ fontSize: 10, color: GRAY, marginTop: 5 }}>of {money(TARGET_MONTHLY)} monthly goal</div>
+                <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+                  <div><div style={{ fontSize: 8, color: "#555", letterSpacing: "0.1em", marginBottom: 2 }}>NEW CASH</div><div style={{ fontSize: 13, fontWeight: 700, color: GREEN }}>{money(stats.revenue)}</div></div>
+                  <div><div style={{ fontSize: 8, color: "#555", letterSpacing: "0.1em", marginBottom: 2 }}>INSTALLMENTS</div><div style={{ fontSize: 13, fontWeight: 700, color: WHITE }}>{money(stats.installment)}</div></div>
+                </div>
               </div>
-              <div style={{ width: 1, height: 56, background: BORDER, flexShrink: 0 }} />
+              <div style={{ width: 1, height: 72, background: BORDER, flexShrink: 0 }} />
               <div style={{ flex: 1 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 7 }}>
                   <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.12em" }}>TO $110K/MONTH</span>
@@ -561,7 +533,7 @@ export default function ReserveDashboard() {
                   <div style={{ height: "100%", borderRadius: 999, width: `${Math.min(monthPct, 100)}%`, background: monthPct >= 75 ? GREEN : monthPct >= 40 ? WHITE : RED, transition: "width 1.2s ease" }} />
                 </div>
                 <div style={{ display: "flex", gap: 28, marginTop: 14 }}>
-                  {([["GAP", money(Math.max(0, TARGET_MONTHLY - stats.revenue))], ["CLOSES LEFT", closesNeeded], ["AVG DEAL", money(avgDeal)], ["CLOSES", stats.closes]] as [string, string|number][]).map(([k, v]) => (
+                  {([["GAP", money(Math.max(0, TARGET_MONTHLY - totalCash))], ["CLOSES LEFT", closesNeeded], ["AVG DEAL", money(avgDeal)], ["CLOSES", stats.closes]] as [string, string|number][]).map(([k, v]) => (
                     <div key={k}>
                       <div style={{ fontSize: 8, color: GRAY, letterSpacing: "0.14em", marginBottom: 3 }}>{k}</div>
                       <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 17, fontWeight: 700, color: WHITE }}>{v}</div>
@@ -572,7 +544,6 @@ export default function ReserveDashboard() {
             </div>
           </div>
 
-          {/* PACING CARD */}
           <div className="fade" style={{ background: SURFACE, border: `1px solid ${isAhead ? GREEN + "44" : RED + "44"}`, borderRadius: 14, padding: "20px 26px", animationDelay: "0.06s", position: "relative", overflow: "hidden" }}>
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: isAhead ? GREEN : RED }} />
             <div style={{ fontSize: 8, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>MONTH PACING — {nowDate.toLocaleString("default", { month: "long" }).toUpperCase()} {nowDate.getFullYear()}</div>
@@ -618,16 +589,15 @@ export default function ReserveDashboard() {
             </div>
           </div>
 
-          {/* KPI STRIP */}
-          <div className="fade" style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, animationDelay: "0.08s" }}>
+          <div className="fade" style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 10, animationDelay: "0.08s" }}>
             <KpiCard label="TOTAL CALLS" value={stats.totalCalls} sub="conducted" />
             <KpiCard label="SHOW UPS" value={stats.shows} sub={`${stats.noShows} no-shows`} />
-            <KpiCard label="SHOW RATE" value={showRate + "%"} sub={`${stats.shows} show ups · ${stats.noShows} no-shows`} color={showRate >= 70 ? GREEN : stats.totalCalls > 0 ? RED : WHITE} />
-            <KpiCard label="CLOSE RATE" value={closeRate + "%"} sub={`${stats.closes} deals / ${stats.shows} show ups`} color={closeRate >= 25 ? GREEN : stats.shows > 0 ? RED : WHITE} />
-            <KpiCard label="CASH COLLECTED" value={money(stats.revenue)} sub={filterLabel} />
+            <KpiCard label="SHOW RATE" value={showRate + "%"} sub={`${stats.shows} of ${stats.totalCalls} calls`} color={showRate >= 70 ? GREEN : stats.totalCalls > 0 ? RED : WHITE} />
+            <KpiCard label="CLOSE RATE" value={closeRate + "%"} sub={`${stats.closes} deals / ${stats.shows} shows`} color={closeRate >= 25 ? GREEN : stats.shows > 0 ? RED : WHITE} />
+            <KpiCard label="NEW CASH" value={money(stats.revenue)} sub={filterLabel} color={GREEN} />
+            <KpiCard label="INSTALLMENTS" value={money(stats.installment)} sub={filterLabel} color={WHITE} />
           </div>
 
-          {/* LEADERBOARD + CHARTS */}
           <div className="fade" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, animationDelay: "0.12s" }}>
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: "20px 22px" }}>
               <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 18 }}>REP LEADERBOARD — {filterLabel}</div>
@@ -636,6 +606,7 @@ export default function ReserveDashboard() {
                 {reps.map((r, i) => {
                   const cr = pct(r.closes, r.shows);
                   const sr = pct(r.shows, r.totalCalls);
+                  const repTotal = r.revenue + r.installment;
                   return (
                     <div key={r.rep}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
@@ -643,13 +614,16 @@ export default function ReserveDashboard() {
                           <span style={{ fontSize: 9, color: i === 0 ? GREEN : GRAY, fontWeight: 500 }}>#{i+1}</span>
                           <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 700, fontSize: 15, color: WHITE }}>{r.rep}</span>
                         </div>
-                        <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 16, color: i === 0 ? GREEN : WHITE }}>{money(r.revenue)}</span>
+                        <div style={{ display: "flex", gap: 12, alignItems: "baseline" }}>
+                          <span style={{ fontSize: 10, color: "#555" }}>{money(r.revenue)} new · {money(r.installment)} inst.</span>
+                          <span style={{ fontFamily: "'Syne', sans-serif", fontWeight: 800, fontSize: 16, color: i === 0 ? GREEN : WHITE }}>{money(repTotal)}</span>
+                        </div>
                       </div>
-                      <Bar value={r.revenue} max={maxRepRev} color={i === 0 ? GREEN : "#282828"} h={3} />
+                      <Bar value={repTotal} max={maxRepRev} color={i === 0 ? GREEN : "#282828"} h={3} />
                       <div style={{ display: "flex", gap: 14, marginTop: 8, flexWrap: "wrap" }}>
                         {([
                           { k: "Calls", v: r.totalCalls, c: null },
-                          { k: "Show Ups", v: r.shows, c: null },
+                          { k: "Shows", v: r.shows, c: null },
                           { k: "No Shows", v: r.noShows, c: null },
                           { k: "Deals", v: r.closes, c: null },
                           { k: "Show%", v: sr+"%", c: sr>=70?GREEN:RED },
@@ -677,8 +651,8 @@ export default function ReserveDashboard() {
               </div>
               <div style={{ height: 1, background: BORDER }} />
               <div>
-                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>DAILY CASH — {filterLabel}</div>
-                <SparkBars data={trend} valueKey="revenue" color={WHITE} />
+                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>DAILY NEW CASH — {filterLabel}</div>
+                <SparkBars data={trend} valueKey="revenue" color={GREEN} />
               </div>
               <div style={{ height: 1, background: BORDER }} />
               <div>
