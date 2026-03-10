@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRK2-o2zUYccClexMlZlYQRqcAu5BuCECMTnI9UYmZu0xKpqWdg2IclcX-sroV1ieWUdOH0gahoBwOy/pub?gid=306047208&single=true&output=csv";
 const REFRESH_INTERVAL = 60000;
+const SEED_REVENUE = 11700;
 
 const COLS: Record<string, string> = {
   date: "Timestamp", rep: "Name", callsBooked: "Total Calls",
@@ -47,14 +48,14 @@ function num(v: unknown): number { const n = parseFloat(String(v).replace(/[^0-9
 function pct(a: number, b: number): number { if (!b) return 0; return Math.round((a / b) * 100); }
 function money(n: number): string { return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 0 }); }
 
-function computeStats(rows: Row[]): Stats {
+function computeStats(rows: Row[], seedRevenue = 0): Stats {
   return {
     totalCalls: rows.reduce((s, r) => s + r.totalCalls, 0),
     callsBooked: rows.reduce((s, r) => s + r.callsBooked, 0),
     shows: rows.reduce((s, r) => s + r.shows, 0),
     noShows: rows.reduce((s, r) => s + r.noShows, 0),
     closes: rows.reduce((s, r) => s + r.closes, 0),
-    revenue: rows.reduce((s, r) => s + r.revenue, 0),
+    revenue: rows.reduce((s, r) => s + r.revenue, seedRevenue),
   };
 }
 
@@ -63,7 +64,7 @@ function repStats(rows: Row[]) {
   rows.forEach(r => {
     const name = r.rep || "Unknown";
     if (!map[name]) map[name] = { rep: name, totalCalls: 0, callsBooked: 0, shows: 0, noShows: 0, closes: 0, revenue: 0, date: "" };
-    (["totalCalls","callsBooked","shows","noShows","closes","revenue"] as (keyof Stats)[]).forEach(k => { (map[name] as any)[k] += r[k]; });
+    (["totalCalls","callsBooked","shows","noShows","closes","revenue"] as (keyof Stats)[]).forEach(k => { (map[name] as any)[k] += (r as any)[k]; });
   });
   return Object.values(map).sort((a, b) => b.revenue - a.revenue);
 }
@@ -156,7 +157,7 @@ export default function ReserveDashboard() {
   const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - filterDays);
   const filtered = rows.filter(r => (filterRep === "All" || r.rep === filterRep) && (!r.date || new Date(r.date) >= cutoff));
 
-  const stats = computeStats(filtered);
+  const stats = computeStats(filtered, SEED_REVENUE);
   const reps = repStats(filtered);
   const trend = dailyTrend(filtered);
   const allReps = ["All", ...Array.from(new Set(rows.map(r => r.rep).filter(Boolean)))];
@@ -177,15 +178,15 @@ export default function ReserveDashboard() {
   const daysRemaining = Math.max(totalDaysInMonth - dayOfMonth + 1, 1);
 
   const monthRows = rows.filter(r => { if (!r.date) return false; const d = new Date(r.date); return d >= monthStart && d <= monthEnd; });
-  const monthStats = computeStats(monthRows);
-  const revenueThisMonth = monthStats.revenue || 0;
+  const monthStats = computeStats(monthRows, SEED_REVENUE);
+  const revenueThisMonth = monthStats.revenue;
   const closesThisMonth = monthStats.closes || 0;
 
   const dailyActual = revenueThisMonth / daysElapsed;
   const dailyNeeded = (TARGET_MONTHLY - revenueThisMonth) / daysRemaining;
   const projectedEOM = Math.round(revenueThisMonth + dailyActual * daysRemaining);
   const expectedByNow = (TARGET_MONTHLY / totalDaysInMonth) * dayOfMonth;
-  const pacingPct = revenueThisMonth > 0 ? Math.round((revenueThisMonth / expectedByNow) * 100) : 0;
+  const pacingPct = Math.round((revenueThisMonth / expectedByNow) * 100);
   const isAhead = pacingPct >= 100;
   const closesPerDayActual = (closesThisMonth / daysElapsed).toFixed(1);
   const closesPerDayNeeded = Math.ceil((TARGET_MONTHLY - revenueThisMonth) / avgDeal / daysRemaining);
