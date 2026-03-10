@@ -18,17 +18,47 @@ const BORDER = "#1E1E1E";
 const BG = "#000000";
 const SURFACE = "#0C0C0C";
 const TARGET_MONTHLY = 110000;
-
 const FONT_URL = "https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap";
+
+type FilterMode = "today" | "this_week" | "this_month" | "last_month" | "7D" | "14D" | "30D" | "90D";
 
 interface Row {
   date: string; rep: string; callsBooked: number; totalCalls: number;
   shows: number; noShows: number; closes: number; revenue: number;
 }
-
 interface Stats {
   totalCalls: number; callsBooked: number; shows: number;
   noShows: number; closes: number; revenue: number;
+}
+
+function getDateRange(mode: FilterMode): { start: Date; end: Date } {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  switch (mode) {
+    case "today":
+      return { start: today, end: new Date(today.getTime() + 86400000 - 1) };
+    case "this_week": {
+      const day = today.getDay();
+      const start = new Date(today); start.setDate(today.getDate() - day);
+      const end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23,59,59);
+      return { start, end };
+    }
+    case "this_month":
+      return {
+        start: new Date(now.getFullYear(), now.getMonth(), 1),
+        end: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59)
+      };
+    case "last_month":
+      return {
+        start: new Date(now.getFullYear(), now.getMonth() - 1, 1),
+        end: new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59)
+      };
+    default: {
+      const days = parseInt(mode);
+      const start = new Date(today); start.setDate(today.getDate() - days);
+      return { start, end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59) };
+    }
+  }
 }
 
 function parseCSV(text: string): Record<string, string>[] {
@@ -72,7 +102,7 @@ function repStats(rows: Row[]) {
 function dailyTrend(rows: Row[]) {
   const map: Record<string, { date: string; closes: number; revenue: number; shows: number }> = {};
   rows.forEach(r => {
-    const d = r.date || "?";
+    const d = r.date ? r.date.split(",")[0].trim() : "?";
     if (!map[d]) map[d] = { date: d, closes: 0, revenue: 0, shows: 0 };
     map[d].closes += r.closes;
     map[d].revenue += r.revenue;
@@ -116,13 +146,24 @@ function KpiCard({ label, value, sub, color }: { label: string; value: string | 
   );
 }
 
+const FILTER_GROUPS = [
+  { label: "TODAY", value: "today" as FilterMode },
+  { label: "THIS WEEK", value: "this_week" as FilterMode },
+  { label: "THIS MONTH", value: "this_month" as FilterMode },
+  { label: "LAST MONTH", value: "last_month" as FilterMode },
+  { label: "7D", value: "7D" as FilterMode },
+  { label: "14D", value: "14D" as FilterMode },
+  { label: "30D", value: "30D" as FilterMode },
+  { label: "90D", value: "90D" as FilterMode },
+];
+
 export default function ReserveDashboard() {
   const [rawRows, setRawRows] = useState<Row[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [filterRep, setFilterRep] = useState("All");
-  const [filterDays, setFilterDays] = useState(30);
+  const [filterMode, setFilterMode] = useState<FilterMode>("this_month");
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -154,10 +195,18 @@ export default function ReserveDashboard() {
   }, [fetchData]);
 
   const rows = rawRows || [];
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - filterDays);
-  const filtered = rows.filter(r => (filterRep === "All" || r.rep === filterRep) && (!r.date || new Date(r.date) >= cutoff));
+  const { start, end } = getDateRange(filterMode);
+  const isThisMonth = filterMode === "this_month";
 
-  const stats = computeStats(filtered, SEED_REVENUE);
+  const filtered = rows.filter(r => {
+    if (filterRep !== "All" && r.rep !== filterRep) return false;
+    if (!r.date) return true;
+    const d = new Date(r.date);
+    return d >= start && d <= end;
+  });
+
+  const seedForFilter = isThisMonth ? SEED_REVENUE : 0;
+  const stats = computeStats(filtered, seedForFilter);
   const reps = repStats(filtered);
   const trend = dailyTrend(filtered);
   const allReps = ["All", ...Array.from(new Set(rows.map(r => r.rep).filter(Boolean)))];
@@ -170,13 +219,13 @@ export default function ReserveDashboard() {
   const maxRepRev = Math.max(...reps.map(r => r.revenue), 1);
 
   const nowDate = new Date();
-  const monthStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
-  const monthEnd = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59);
-  const totalDaysInMonth = monthEnd.getDate();
+  const totalDaysInMonth = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0).getDate();
   const dayOfMonth = nowDate.getDate();
   const daysElapsed = Math.max(dayOfMonth - 1, 1);
   const daysRemaining = Math.max(totalDaysInMonth - dayOfMonth + 1, 1);
 
+  const monthStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
+  const monthEnd = new Date(nowDate.getFullYear(), nowDate.getMonth() + 1, 0, 23, 59, 59);
   const monthRows = rows.filter(r => { if (!r.date) return false; const d = new Date(r.date); return d >= monthStart && d <= monthEnd; });
   const monthStats = computeStats(monthRows, SEED_REVENUE);
   const revenueThisMonth = monthStats.revenue;
@@ -192,9 +241,12 @@ export default function ReserveDashboard() {
   const closesPerDayNeeded = Math.ceil((TARGET_MONTHLY - revenueThisMonth) / avgDeal / daysRemaining);
   const callsPerClose = stats.closes > 0 ? (stats.totalCalls / stats.closes).toFixed(1) : "—";
 
+  const filterLabel = FILTER_GROUPS.find(f => f.value === filterMode)?.label || "";
+
   const chip = (active: boolean, onClick: () => void, label: string) => (
     <button onClick={onClick} style={{
-      background: active ? WHITE : "transparent", border: `1px solid ${active ? WHITE : BORDER}`,
+      background: active ? WHITE : "transparent",
+      border: `1px solid ${active ? WHITE : BORDER}`,
       color: active ? BG : GRAY, borderRadius: 6, padding: "4px 11px", fontSize: 10, cursor: "pointer",
       fontFamily: "'DM Mono', monospace", letterSpacing: "0.06em", transition: "all 0.12s",
     }}>{label}</button>
@@ -222,12 +274,19 @@ export default function ReserveDashboard() {
       </nav>
 
       <div style={{ padding: "20px 24px", display: "flex", flexDirection: "column", gap: 14 }}>
-        <div className="fade" style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.12em", marginRight: 2 }}>PERIOD</span>
-          {[7,14,30,90].map(d => chip(filterDays===d, ()=>setFilterDays(d), d+"D"))}
-          <div style={{ width: 1, height: 14, background: BORDER, margin: "0 6px" }} />
-          <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.12em", marginRight: 2 }}>REP</span>
-          {allReps.map(r => chip(filterRep===r, ()=>setFilterRep(r), r))}
+
+        {/* FILTER BAR */}
+        <div className="fade" style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 12, padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.12em", marginRight: 4 }}>VIEW</span>
+            {FILTER_GROUPS.slice(0, 4).map(f => chip(filterMode === f.value, () => setFilterMode(f.value), f.label))}
+            <div style={{ width: 1, height: 14, background: BORDER, margin: "0 4px" }} />
+            {FILTER_GROUPS.slice(4).map(f => chip(filterMode === f.value, () => setFilterMode(f.value), f.label))}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 9, color: GRAY, letterSpacing: "0.12em", marginRight: 4 }}>REP</span>
+            {allReps.map(r => chip(filterRep === r, () => setFilterRep(r), r))}
+          </div>
         </div>
 
         {loading ? (
@@ -236,13 +295,14 @@ export default function ReserveDashboard() {
           <div style={{ padding: 60, textAlign: "center", fontSize: 12, color: RED }}>{error}</div>
         ) : (<>
 
+          {/* GOAL CARD */}
           <div className="fade" style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: "22px 26px", position: "relative", overflow: "hidden", animationDelay: "0.04s" }}>
             <div style={{ position: "absolute", inset: 0, pointerEvents: "none", background: `linear-gradient(90deg, ${monthPct >= 50 ? GREEN : RED}0A 0%, transparent 55%)`, width: `${monthPct}%`, transition: "width 1.2s ease" }} />
             <div style={{ position: "relative", display: "flex", gap: 36, alignItems: "center" }}>
-              <div style={{ minWidth: 180 }}>
-                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 5 }}>CASH COLLECTED THIS PERIOD</div>
+              <div style={{ minWidth: 200 }}>
+                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 5 }}>CASH COLLECTED — {filterLabel}</div>
                 <div style={{ fontFamily: "'Syne', sans-serif", fontSize: 44, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1, color: WHITE }}>{money(stats.revenue)}</div>
-                <div style={{ fontSize: 10, color: GRAY, marginTop: 5 }}>of {money(TARGET_MONTHLY)} goal</div>
+                <div style={{ fontSize: 10, color: GRAY, marginTop: 5 }}>of {money(TARGET_MONTHLY)} monthly goal</div>
               </div>
               <div style={{ width: 1, height: 56, background: BORDER, flexShrink: 0 }} />
               <div style={{ flex: 1 }}>
@@ -265,11 +325,12 @@ export default function ReserveDashboard() {
             </div>
           </div>
 
+          {/* PACING CARD — always shows current month */}
           <div className="fade" style={{ background: SURFACE, border: `1px solid ${isAhead ? GREEN + "44" : RED + "44"}`, borderRadius: 14, padding: "20px 26px", animationDelay: "0.06s", position: "relative", overflow: "hidden" }}>
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: isAhead ? GREEN : RED }} />
+            <div style={{ fontSize: 8, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>MONTH PACING — MARCH {nowDate.getFullYear()}</div>
             <div style={{ display: "flex", alignItems: "stretch" }}>
               <div style={{ minWidth: 160, display: "flex", flexDirection: "column", justifyContent: "center", gap: 4, paddingRight: 28, borderRight: `1px solid ${BORDER}` }}>
-                <div style={{ fontSize: 9, color: WHITE, letterSpacing: "0.14em", marginBottom: 4 }}>MONTH PACING</div>
                 <div style={{ display: "inline-flex", alignItems: "center", gap: 7, background: isAhead ? GREEN + "18" : RED + "18", border: `1px solid ${isAhead ? GREEN + "55" : RED + "55"}`, borderRadius: 6, padding: "5px 10px", width: "fit-content" }}>
                   <div style={{ width: 6, height: 6, borderRadius: "50%", background: isAhead ? GREEN : RED, boxShadow: `0 0 8px ${isAhead ? GREEN : RED}` }} />
                   <span style={{ fontSize: 11, fontWeight: 700, color: isAhead ? GREEN : RED, fontFamily: "'Syne', sans-serif", letterSpacing: "0.05em" }}>{isAhead ? "AHEAD" : "BEHIND"}</span>
@@ -310,18 +371,20 @@ export default function ReserveDashboard() {
             </div>
           </div>
 
+          {/* KPI STRIP */}
           <div className="fade" style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, animationDelay: "0.08s" }}>
             <KpiCard label="TOTAL CALLS" value={stats.totalCalls} sub="conducted" />
             <KpiCard label="SHOW UPS" value={stats.shows} sub={`${stats.noShows} no-shows`} />
             <KpiCard label="SHOW RATE" value={showRate + "%"} sub={`${stats.shows} show ups · ${stats.noShows} no-shows`} color={showRate >= 70 ? GREEN : stats.totalCalls > 0 ? RED : WHITE} />
             <KpiCard label="CLOSE RATE" value={closeRate + "%"} sub={`${stats.closes} deals / ${stats.shows} show ups`} color={closeRate >= 25 ? GREEN : stats.shows > 0 ? RED : WHITE} />
-            <KpiCard label="CASH COLLECTED" value={money(stats.revenue)} sub={`${filterDays}d window`} />
+            <KpiCard label="CASH COLLECTED" value={money(stats.revenue)} sub={filterLabel} />
           </div>
 
+          {/* LEADERBOARD + CHARTS */}
           <div className="fade" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, animationDelay: "0.12s" }}>
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: "20px 22px" }}>
-              <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 18 }}>REP LEADERBOARD</div>
-              {reps.length === 0 && <div style={{ fontSize: 11, color: GRAY }}>No data yet — submit your first form entry.</div>}
+              <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 18 }}>REP LEADERBOARD — {filterLabel}</div>
+              {reps.length === 0 && <div style={{ fontSize: 11, color: GRAY }}>No data for this period yet.</div>}
               <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
                 {reps.map((r, i) => {
                   const cr = pct(r.closes, r.shows);
@@ -358,7 +421,7 @@ export default function ReserveDashboard() {
 
             <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: "20px 22px", display: "flex", flexDirection: "column", gap: 18 }}>
               <div>
-                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>DAILY CLOSES</div>
+                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>DAILY CLOSES — {filterLabel}</div>
                 <SparkBars data={trend} valueKey="closes" color={GREEN} />
                 <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
                   <span style={{ fontSize: 8, color: "#888" }}>{trend[0]?.date}</span>
@@ -367,7 +430,7 @@ export default function ReserveDashboard() {
               </div>
               <div style={{ height: 1, background: BORDER }} />
               <div>
-                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>DAILY CASH COLLECTED</div>
+                <div style={{ fontSize: 9, color: GRAY, letterSpacing: "0.14em", marginBottom: 12 }}>DAILY CASH — {filterLabel}</div>
                 <SparkBars data={trend} valueKey="revenue" color={WHITE} />
               </div>
               <div style={{ height: 1, background: BORDER }} />
