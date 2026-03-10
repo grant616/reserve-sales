@@ -21,12 +21,9 @@ interface Row { id: string; date: string; rep: string; totalCalls: number; shows
 interface Override { id: string; field: string; value: number; }
 interface ManualEntry { id: string; date: string; rep: string; totalCalls: number; shows: number; noShows: number; closes: number; revenue: number; installment: number; }
 
-async function api(action: string, body: Record<string, unknown> = {}) {
-  const res = await fetch(ADMIN_API, {
-    method: "POST", redirect: "follow",
-    headers: { "Content-Type": "text/plain" },
-    body: JSON.stringify({ action, ...body }),
-  });
+async function api(params: Record<string, unknown>) {
+  const qs = Object.entries(params).map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join("&");
+  const res = await fetch(`${ADMIN_API}?${qs}`, { redirect: "follow" });
   return res.json();
 }
 
@@ -121,6 +118,16 @@ const FILTER_GROUPS = [
 ];
 const FIELDS = ["totalCalls","shows","noShows","closes","installment","revenue"];
 
+function Toast({message,visible}:{message:string;visible:boolean}) {
+  return (
+    <div style={{position:"fixed",bottom:24,right:24,zIndex:999,transition:"all 0.3s ease",opacity:visible?1:0,transform:visible?"translateY(0)":"translateY(12px)",pointerEvents:"none"}}>
+      <div style={{background:GREEN,color:BG,borderRadius:8,padding:"10px 18px",fontSize:11,fontFamily:"'DM Mono'",fontWeight:700,letterSpacing:"0.08em",boxShadow:`0 0 20px ${GREEN}66`}}>
+        ✓ {message}
+      </div>
+    </div>
+  );
+}
+
 export default function ReserveDashboard() {
   const [rawRows, setRawRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,11 +135,13 @@ export default function ReserveDashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date|null>(null);
   const [filterRep, setFilterRep] = useState("All");
   const [filterMode, setFilterMode] = useState<FilterMode>("this_month");
-  const [seedRevenue, setSeedRevenue] = useState(11700);
+  const [seedRevenue, setSeedRevenue] = useState(0);
   const [overrides, setOverrides] = useState<Override[]>([]);
   const [manualEntries, setManualEntries] = useState<ManualEntry[]>([]);
   const [adminLoading, setAdminLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [toastMsg, setToastMsg] = useState("");
+  const [toastVisible, setToastVisible] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminAuthed, setAdminAuthed] = useState(false);
   const [adminPwInput, setAdminPwInput] = useState("");
@@ -142,6 +151,13 @@ export default function ReserveDashboard() {
   const [newEntry, setNewEntry] = useState({date:"",rep:"",totalCalls:"",shows:"",noShows:"",closes:"",installment:"",revenue:""});
   const [activeAdminTab, setActiveAdminTab] = useState<"overrides"|"manual"|"settings">("overrides");
   const seedDebounce = useRef<ReturnType<typeof setTimeout>|null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>|null>(null);
+
+  function toast(msg: string) {
+    setToastMsg(msg); setToastVisible(true);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastVisible(false), 3000);
+  }
 
   useEffect(() => {
     const link = document.createElement("link"); link.rel="stylesheet"; link.href=FONT_URL;
@@ -151,7 +167,7 @@ export default function ReserveDashboard() {
   const fetchAdminData = useCallback(async () => {
     setAdminLoading(true);
     try {
-      const data = await api("getAdminData");
+      const data = await api({action:"getAdminData"});
       if (data.overrides) setOverrides(data.overrides);
       if (data.manual) setManualEntries(data.manual);
       if (typeof data.seed === "number") setSeedRevenue(data.seed);
@@ -166,10 +182,10 @@ export default function ReserveDashboard() {
       const text = await res.text();
       const parsed = parseCSV(text);
       const normalized: Row[] = parsed.map((r,i) => ({
-        id: `row_${i}`, date: gv(r,"date"), rep: gv(r,"rep"),
-        totalCalls: num(gv(r,"totalCalls")), shows: num(gv(r,"shows")),
-        noShows: num(gv(r,"noShows")), closes: num(gv(r,"closes")),
-        installment: num(gv(r,"installment")), revenue: num(gv(r,"revenue")),
+        id:`row_${i}`, date:gv(r,"date"), rep:gv(r,"rep"),
+        totalCalls:num(gv(r,"totalCalls")), shows:num(gv(r,"shows")),
+        noShows:num(gv(r,"noShows")), closes:num(gv(r,"closes")),
+        installment:num(gv(r,"installment")), revenue:num(gv(r,"revenue")),
       }));
       setRawRows(normalized); setError(null);
     } catch(e) { setError((e as Error).message); }
@@ -196,9 +212,9 @@ export default function ReserveDashboard() {
   const reps = repStats(filtered);
   const trend = dailyTrend(filtered);
   const allReps = ["All",...Array.from(new Set(allRows.map(r=>r.rep).filter(Boolean)))];
-  const monthPct = pct(totalCash, TARGET_MONTHLY);
-  const showRate = pct(stats.shows, stats.totalCalls);
-  const closeRate = pct(stats.closes, stats.shows);
+  const monthPct = pct(totalCash,TARGET_MONTHLY);
+  const showRate = pct(stats.shows,stats.totalCalls);
+  const closeRate = pct(stats.closes,stats.shows);
   const avgDeal = stats.closes?Math.round(stats.revenue/stats.closes):6000;
   const closesNeeded = Math.max(0,Math.ceil((TARGET_MONTHLY-totalCash)/avgDeal));
   const maxRepRev = Math.max(...reps.map(r=>r.revenue+r.installment),1);
@@ -211,7 +227,7 @@ export default function ReserveDashboard() {
   const monthStart = new Date(nowDate.getFullYear(),nowDate.getMonth(),1);
   const monthEnd = new Date(nowDate.getFullYear(),nowDate.getMonth()+1,0,23,59,59);
   const monthRows = allRows.filter(r => { if(!r.date) return false; const d=new Date(r.date); return d>=monthStart&&d<=monthEnd; });
-  const monthStats = computeStats(monthRows, seedRevenue);
+  const monthStats = computeStats(monthRows,seedRevenue);
   const revenueThisMonth = monthStats.revenue+monthStats.installment;
   const dailyActual = revenueThisMonth/daysElapsed;
   const dailyNeeded = (TARGET_MONTHLY-revenueThisMonth)/daysRemaining;
@@ -232,44 +248,61 @@ export default function ReserveDashboard() {
 
   async function startEdit(row: Row) {
     setEditingRow(row.id);
-    const overridden = applyOverrides([row], overrides)[0];
+    const overridden = applyOverrides([row],overrides)[0];
     setEditVals({totalCalls:String(overridden.totalCalls),shows:String(overridden.shows),noShows:String(overridden.noShows),closes:String(overridden.closes),installment:String(overridden.installment),revenue:String(overridden.revenue)});
   }
 
   async function saveEdit(rowId: string) {
     setSaving(true);
-    for (const field of FIELDS) {
-      await api("saveOverride", {id:rowId, field, value:num(editVals[field])});
-    }
-    await fetchAdminData();
-    setEditingRow(null); setSaving(false);
+    try {
+      for (const field of FIELDS) {
+        const result = await api({action:"saveOverride", id:rowId, field, value:num(editVals[field])});
+        if (!result.ok) throw new Error("Save failed");
+      }
+      await fetchAdminData();
+      setEditingRow(null);
+      toast("Row overrides saved to sheet");
+    } catch { toast("❌ Save failed — check Apps Script"); }
+    setSaving(false);
   }
 
-  async function deleteOverride(rowId: string) {
+  async function deleteOverrideForRow(rowId: string) {
     setSaving(true);
-    await api("deleteOverride", {id:rowId});
-    await fetchAdminData();
+    try {
+      await api({action:"deleteOverride", id:rowId});
+      await fetchAdminData();
+      toast("Override removed");
+    } catch {}
     setSaving(false);
   }
 
   async function addManualEntry() {
     if (!newEntry.rep||!newEntry.date) return;
     setSaving(true);
-    const entry: ManualEntry = {
-      id: `manual_${Date.now()}`, date:newEntry.date, rep:newEntry.rep,
-      totalCalls:num(newEntry.totalCalls), shows:num(newEntry.shows), noShows:num(newEntry.noShows),
-      closes:num(newEntry.closes), installment:num(newEntry.installment), revenue:num(newEntry.revenue),
-    };
-    await api("saveManualEntry", entry);
-    await fetchAdminData();
-    setNewEntry({date:"",rep:"",totalCalls:"",shows:"",noShows:"",closes:"",installment:"",revenue:""});
+    try {
+      const entry = {
+        action:"saveManualEntry", id:`manual_${Date.now()}`,
+        date:newEntry.date, rep:newEntry.rep,
+        totalCalls:num(newEntry.totalCalls), shows:num(newEntry.shows),
+        noShows:num(newEntry.noShows), closes:num(newEntry.closes),
+        installment:num(newEntry.installment), revenue:num(newEntry.revenue),
+      };
+      const result = await api(entry);
+      if (!result.ok) throw new Error("Failed");
+      await fetchAdminData();
+      setNewEntry({date:"",rep:"",totalCalls:"",shows:"",noShows:"",closes:"",installment:"",revenue:""});
+      toast("Entry saved to sheet");
+    } catch { toast("❌ Save failed — check Apps Script"); }
     setSaving(false);
   }
 
   async function deleteManualEntry(id: string) {
     setSaving(true);
-    await api("deleteManualEntry", {id});
-    await fetchAdminData();
+    try {
+      await api({action:"deleteManualEntry", id});
+      await fetchAdminData();
+      toast("Entry deleted");
+    } catch {}
     setSaving(false);
   }
 
@@ -277,17 +310,21 @@ export default function ReserveDashboard() {
     setSeedRevenue(val);
     if (seedDebounce.current) clearTimeout(seedDebounce.current);
     seedDebounce.current = setTimeout(async () => {
-      await api("saveSeed", {value:val});
+      try {
+        const result = await api({action:"saveSeed", value:val});
+        if (result.ok) toast("Seed revenue saved to sheet");
+      } catch {}
     }, 800);
   }
 
   async function nukeAll() {
-    if (!confirm("Wipe ALL admin changes permanently across all devices? This cannot be undone.")) return;
+    if (!confirm("Wipe ALL admin changes permanently across all devices?")) return;
     setSaving(true);
-    for (const o of overrides) await api("deleteOverride", {id:o.id});
-    for (const m of manualEntries) await api("deleteManualEntry", {id:m.id});
-    await api("saveSeed", {value:0});
+    for (const o of overrides) await api({action:"deleteOverride", id:o.id});
+    for (const m of manualEntries) await api({action:"deleteManualEntry", id:m.id});
+    await api({action:"saveSeed", value:0});
     await fetchAdminData();
+    toast("All admin data cleared");
     setSaving(false);
   }
 
@@ -297,6 +334,8 @@ export default function ReserveDashboard() {
     <div style={{fontFamily:"'DM Mono',monospace",background:BG,minHeight:"100vh",color:WHITE}}>
       <style>{`@keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}@keyframes up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}.fade{animation:up 0.35s ease both}input::placeholder{color:#444}`}</style>
 
+      <Toast message={toastMsg} visible={toastVisible}/>
+
       <nav style={{borderBottom:`1px solid ${BORDER}`,height:50,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 24px",position:"sticky",top:0,zIndex:20,background:"rgba(0,0,0,0.95)",backdropFilter:"blur(16px)"}}>
         <div style={{display:"flex",alignItems:"center",gap:12}}>
           <div style={{width:7,height:7,borderRadius:"50%",background:GREEN,boxShadow:`0 0 10px ${GREEN}80`,animation:"blink 2.5s ease infinite"}}/>
@@ -305,7 +344,7 @@ export default function ReserveDashboard() {
           <span style={{fontSize:9,color:GRAY,letterSpacing:"0.14em"}}>SALES DASHBOARD</span>
         </div>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          {saving&&<span style={{fontSize:8,color:GREEN,letterSpacing:"0.1em"}}>● SAVING...</span>}
+          {saving&&<span style={{fontSize:8,color:GREEN,letterSpacing:"0.1em",animation:"blink 1s ease infinite"}}>● SAVING...</span>}
           {lastRefresh&&<span style={{fontSize:9,color:"#666"}}>{lastRefresh.toLocaleTimeString()}</span>}
           <button onClick={()=>setShowAdmin(!showAdmin)} style={{background:showAdmin?"#1a1a1a":"transparent",border:`1px solid ${showAdmin?WHITE:BORDER}`,color:showAdmin?WHITE:"#666",borderRadius:6,padding:"4px 10px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'",letterSpacing:"0.1em"}}>⚙ ADMIN</button>
           <button onClick={fetchData} style={{background:"transparent",border:`1px solid ${BORDER}`,color:GRAY,borderRadius:6,padding:"4px 10px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'",letterSpacing:"0.1em"}}>↻ SYNC</button>
@@ -327,20 +366,20 @@ export default function ReserveDashboard() {
           ):(
             <div>
               <div style={{display:"flex",gap:8,marginBottom:18,alignItems:"center"}}>
-                <span style={{fontSize:9,color:GREEN,letterSpacing:"0.14em",marginRight:8}}>✓ ADMIN — SYNCED TO SHEET</span>
+                <span style={{fontSize:9,color:GREEN,letterSpacing:"0.14em",marginRight:8}}>✓ SYNCED TO GOOGLE SHEET</span>
                 <button style={adminTabStyle(activeAdminTab==="overrides")} onClick={()=>setActiveAdminTab("overrides")}>EDIT ROWS</button>
                 <button style={adminTabStyle(activeAdminTab==="manual")} onClick={()=>setActiveAdminTab("manual")}>ADD ENTRY</button>
                 <button style={adminTabStyle(activeAdminTab==="settings")} onClick={()=>setActiveAdminTab("settings")}>SETTINGS</button>
                 <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
                   {adminLoading&&<span style={{fontSize:8,color:"#666",letterSpacing:"0.1em"}}>LOADING...</span>}
-                  <button onClick={()=>fetchAdminData()} style={{background:"transparent",border:`1px solid ${BORDER}`,color:"#666",borderRadius:6,padding:"5px 10px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>↻ REFRESH</button>
+                  <button onClick={fetchAdminData} style={{background:"transparent",border:`1px solid ${BORDER}`,color:"#666",borderRadius:6,padding:"5px 10px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>↻ REFRESH</button>
                   <button onClick={()=>{setAdminAuthed(false);setShowAdmin(false);}} style={{background:"transparent",border:`1px solid ${BORDER}`,color:"#666",borderRadius:6,padding:"5px 12px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>LOCK</button>
                 </div>
               </div>
 
               {activeAdminTab==="overrides"&&(
                 <div>
-                  <div style={{fontSize:9,color:GRAY,letterSpacing:"0.14em",marginBottom:12}}>EDIT / OVERRIDE FORM SUBMISSIONS — synced across all devices</div>
+                  <div style={{fontSize:9,color:GRAY,letterSpacing:"0.14em",marginBottom:12}}>EDIT ROWS — saves permanently to Google Sheet, visible to everyone</div>
                   <div style={{display:"flex",flexDirection:"column",gap:8,maxHeight:320,overflowY:"auto"}}>
                     {rawRows.length===0&&<div style={{fontSize:11,color:"#555"}}>No form submissions yet.</div>}
                     {rawRows.map(row=>{
@@ -353,7 +392,7 @@ export default function ReserveDashboard() {
                             <div style={{display:"flex",gap:16,alignItems:"center"}}>
                               <span style={{fontSize:11,fontWeight:700,color:WHITE}}>{row.rep}</span>
                               <span style={{fontSize:10,color:"#555"}}>{row.date}</span>
-                              {hasOverride&&<span style={{fontSize:8,color:GREEN,letterSpacing:"0.1em"}}>EDITED</span>}
+                              {hasOverride&&<span style={{fontSize:8,color:GREEN,letterSpacing:"0.1em"}}>● EDITED</span>}
                             </div>
                             {!isEditing?(
                               <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap"}}>
@@ -363,11 +402,11 @@ export default function ReserveDashboard() {
                                   </span>
                                 ))}
                                 <button onClick={()=>startEdit(row)} style={{background:"transparent",border:`1px solid ${BORDER}`,color:GRAY,borderRadius:5,padding:"3px 10px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>EDIT</button>
-                                {hasOverride&&<button onClick={()=>deleteOverride(row.id)} style={{background:"transparent",border:`1px solid ${RED}44`,color:RED,borderRadius:5,padding:"3px 8px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>RESET</button>}
+                                {hasOverride&&<button onClick={()=>deleteOverrideForRow(row.id)} style={{background:"transparent",border:`1px solid ${RED}44`,color:RED,borderRadius:5,padding:"3px 8px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>RESET</button>}
                               </div>
                             ):(
                               <div style={{display:"flex",gap:8}}>
-                                <button onClick={()=>saveEdit(row.id)} disabled={saving} style={{background:GREEN,color:BG,border:"none",borderRadius:5,padding:"4px 12px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'",fontWeight:700,opacity:saving?0.5:1}}>SAVE</button>
+                                <button onClick={()=>saveEdit(row.id)} disabled={saving} style={{background:GREEN,color:BG,border:"none",borderRadius:5,padding:"4px 12px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'",fontWeight:700,opacity:saving?0.5:1}}>{saving?"SAVING...":"SAVE"}</button>
                                 <button onClick={()=>setEditingRow(null)} style={{background:"transparent",border:`1px solid ${BORDER}`,color:GRAY,borderRadius:5,padding:"4px 10px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>CANCEL</button>
                               </div>
                             )}
@@ -391,25 +430,25 @@ export default function ReserveDashboard() {
 
               {activeAdminTab==="manual"&&(
                 <div>
-                  <div style={{fontSize:9,color:GRAY,letterSpacing:"0.14em",marginBottom:12}}>ADD MANUAL ENTRY — visible to everyone immediately</div>
+                  <div style={{fontSize:9,color:GRAY,letterSpacing:"0.14em",marginBottom:12}}>ADD ENTRY — saves to Google Sheet, visible to everyone immediately</div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(8,1fr)",gap:8,marginBottom:10}}>
-                    {[{key:"date",label:"DATE",ph:"3/9/2026"},{key:"rep",label:"REP NAME",ph:"Cobe"},{key:"totalCalls",label:"TOTAL CALLS",ph:"0"},{key:"shows",label:"SHOW UPS",ph:"0"},{key:"noShows",label:"NO SHOWS",ph:"0"},{key:"closes",label:"CLOSES",ph:"0"},{key:"installment",label:"INSTALLMENT $",ph:"0"},{key:"revenue",label:"NEW CASH $",ph:"0"}].map(({key,label,ph})=>(
+                    {[{key:"date",label:"DATE",ph:"3/9/2026"},{key:"rep",label:"REP NAME",ph:"Cobe"},{key:"totalCalls",label:"CALLS",ph:"0"},{key:"shows",label:"SHOWS",ph:"0"},{key:"noShows",label:"NO SHOWS",ph:"0"},{key:"closes",label:"CLOSES",ph:"0"},{key:"installment",label:"INSTALLMENT $",ph:"0"},{key:"revenue",label:"NEW CASH $",ph:"0"}].map(({key,label,ph})=>(
                       <div key={key}>
                         <div style={{fontSize:8,color:"#555",letterSpacing:"0.1em",marginBottom:4}}>{label}</div>
                         <input value={(newEntry as any)[key]} placeholder={ph} onChange={e=>setNewEntry({...newEntry,[key]:e.target.value})} style={inputStyle}/>
                       </div>
                     ))}
                   </div>
-                  <button onClick={addManualEntry} disabled={saving} style={{background:GREEN,color:BG,border:"none",borderRadius:6,padding:"8px 20px",fontSize:10,cursor:"pointer",fontFamily:"'DM Mono'",fontWeight:700,letterSpacing:"0.08em",opacity:saving?0.5:1}}>+ ADD ENTRY</button>
+                  <button onClick={addManualEntry} disabled={saving} style={{background:GREEN,color:BG,border:"none",borderRadius:6,padding:"8px 20px",fontSize:10,cursor:"pointer",fontFamily:"'DM Mono'",fontWeight:700,letterSpacing:"0.08em",opacity:saving?0.5:1}}>{saving?"SAVING...":"+ ADD ENTRY"}</button>
                   {manualEntries.length>0&&(
                     <div style={{marginTop:16}}>
-                      <div style={{fontSize:9,color:"#555",letterSpacing:"0.14em",marginBottom:8}}>SAVED MANUAL ENTRIES ({manualEntries.length})</div>
+                      <div style={{fontSize:9,color:"#555",letterSpacing:"0.14em",marginBottom:8}}>SAVED ENTRIES ({manualEntries.length}) — stored in Google Sheet</div>
                       {manualEntries.map(m=>(
                         <div key={m.id} style={{display:"flex",gap:16,alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${BORDER}`}}>
                           <span style={{fontSize:11,color:WHITE,minWidth:80}}>{m.rep}</span>
                           <span style={{fontSize:10,color:"#555",minWidth:100}}>{m.date}</span>
                           {FIELDS.map(f=><span key={f} style={{fontSize:10,color:"#666"}}>{f}: <span style={{color:WHITE}}>{(m as any)[f]}</span></span>)}
-                          <button onClick={()=>deleteManualEntry(m.id)} style={{marginLeft:"auto",background:"transparent",border:`1px solid ${RED}44`,color:RED,borderRadius:5,padding:"2px 8px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>✕</button>
+                          <button onClick={()=>deleteManualEntry(m.id)} disabled={saving} style={{marginLeft:"auto",background:"transparent",border:`1px solid ${RED}44`,color:RED,borderRadius:5,padding:"2px 8px",fontSize:9,cursor:"pointer",fontFamily:"'DM Mono'"}}>✕</button>
                         </div>
                       ))}
                     </div>
@@ -419,11 +458,11 @@ export default function ReserveDashboard() {
 
               {activeAdminTab==="settings"&&(
                 <div>
-                  <div style={{fontSize:9,color:GRAY,letterSpacing:"0.14em",marginBottom:16}}>DASHBOARD SETTINGS — synced across all devices</div>
+                  <div style={{fontSize:9,color:GRAY,letterSpacing:"0.14em",marginBottom:16}}>SETTINGS — synced across all devices via Google Sheet</div>
                   <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,maxWidth:600}}>
                     <div>
                       <div style={{fontSize:9,color:"#555",letterSpacing:"0.1em",marginBottom:6}}>SEED REVENUE ($)</div>
-                      <div style={{fontSize:8,color:"#444",marginBottom:6}}>Pre-dashboard cash for this month</div>
+                      <div style={{fontSize:8,color:"#444",marginBottom:6}}>Add pre-dashboard cash collected this month</div>
                       <input value={seedRevenue} onChange={e=>handleSeedChange(num(e.target.value))} style={inputStyle}/>
                     </div>
                     <div>
@@ -486,10 +525,7 @@ export default function ReserveDashboard() {
                 </div>
                 <div style={{display:"flex",gap:28,marginTop:14}}>
                   {([["GAP",money(Math.max(0,TARGET_MONTHLY-totalCash))],["CLOSES LEFT",closesNeeded],["AVG DEAL",money(avgDeal)],["CLOSES",stats.closes]] as [string,string|number][]).map(([k,v])=>(
-                    <div key={k}>
-                      <div style={{fontSize:8,color:GRAY,letterSpacing:"0.14em",marginBottom:3}}>{k}</div>
-                      <div style={{fontFamily:"'Syne',sans-serif",fontSize:17,fontWeight:700,color:WHITE}}>{v}</div>
-                    </div>
+                    <div key={k}><div style={{fontSize:8,color:GRAY,letterSpacing:"0.14em",marginBottom:3}}>{k}</div><div style={{fontFamily:"'Syne',sans-serif",fontSize:17,fontWeight:700,color:WHITE}}>{v}</div></div>
                   ))}
                 </div>
               </div>
@@ -534,9 +570,7 @@ export default function ReserveDashboard() {
                 <div style={{height:"100%",borderRadius:999,width:`${Math.min((revenueThisMonth/TARGET_MONTHLY)*100,100)}%`,background:isAhead?GREEN:RED,transition:"width 1s ease"}}/>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",marginTop:5}}>
-                <span style={{fontSize:7,color:WHITE}}>$0</span>
-                <span style={{fontSize:7,color:WHITE}}>$55K</span>
-                <span style={{fontSize:7,color:WHITE}}>$110K</span>
+                <span style={{fontSize:7,color:WHITE}}>$0</span><span style={{fontSize:7,color:WHITE}}>$55K</span><span style={{fontSize:7,color:WHITE}}>$110K</span>
               </div>
             </div>
           </div>
