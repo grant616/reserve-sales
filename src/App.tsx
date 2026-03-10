@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRK2-o2zUYccClexMlZlYQRqcAu5BuCECMTnI9UYmZu0xKpqWdg2IclcX-sroV1ieWUdOH0gahoBwOy/pub?gid=306047208&single=true&output=csv";
-const ADMIN_API = "https://script.google.com/macros/s/AKfycbwmCmfBdIQsaoloPV_wAxkatcAeyb8SkQgQ_YJQuKAvUJJb8cvjMueGXcAM4PuNDU-m4A/exec";
+const ADMIN_API = "https://script.google.com/macros/s/AKfycbxwpQpyJMlxo9N76ZCAoSdJoSjH_pJHjxxOK3nGubFL-RN82f25sBXCJLMJWLmD5voVxQ/exec";
 const REFRESH_INTERVAL = 60000;
 const ADMIN_PASSWORD = "reserve2026";
 
